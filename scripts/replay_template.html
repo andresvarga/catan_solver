@@ -93,6 +93,7 @@
   main {
     display: grid; grid-template-columns: minmax(0, 1fr) 372px;
     gap: 12px; padding: 12px 16px; min-height: 0;
+    overflow: hidden; /* dynamic panels must never spill over the transport bar */
   }
   #boardwrap {
     background: var(--sea); border: 1px solid var(--border); border-radius: 10px;
@@ -128,7 +129,7 @@
   }
 
   /* right column */
-  #side { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 10px; min-height: 0; }
+  #side { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 10px; min-height: 0; overflow: hidden; }
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 10px 12px;
@@ -174,9 +175,12 @@
   }
   .dv small { font-weight: 500; color: var(--ink-3); }
 
-  /* trade banner */
-  #trade { display: none; border-left: 4px solid var(--accent); }
-  #trade.on { display: block; }
+  /* trade banner: always rendered (an appearing/disappearing card reflowed
+     the whole column every time a negotiation started or ended) */
+  #trade { border-left: 4px solid var(--border); }
+  #trade.on { border-left-color: var(--accent); }
+  #tradebody { min-height: 38px; }
+  .tidle { color: var(--ink-3); font-size: 12px; }
   #trade .trow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; margin: 3px 0; }
   #trade .tarrow { color: var(--ink-3); font-size: 13px; }
   #trade .twho { font-weight: 700; }
@@ -187,7 +191,9 @@
   #trade .tevent.good { color: var(--good); }
   #trade .tevent.bad { color: var(--bad); }
 
-  /* diagnostics */
+  /* diagnostics: fixed height + internal scroll so per-decision content
+     variation can't move the log or the transport bar */
+  #diag { height: 248px; overflow-y: auto; }
   #diag .empty { color: var(--ink-3); font-size: 12.5px; }
   .drow { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; }
   .drow .lbl { width: 118px; color: var(--ink-2); flex: none; }
@@ -202,7 +208,7 @@
 
   /* log */
   #logcard { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
-  #log { overflow-y: auto; font-size: 12px; min-height: 0; }
+  #log { overflow-y: auto; font-size: 12px; min-height: 0; position: relative; }
   .lrow {
     display: flex; gap: 7px; padding: 1.5px 6px; border-radius: 5px; cursor: pointer;
     align-items: baseline;
@@ -236,7 +242,7 @@
   @media (max-width: 940px) {
     main { grid-template-columns: 1fr; grid-template-rows: minmax(320px, 55vh) auto; overflow-y: auto; }
     #app { height: auto; }
-    #side { grid-template-rows: auto auto auto 300px; }
+    #side { grid-template-rows: auto auto auto 300px; overflow: visible; }
   }
   @media (prefers-reduced-motion: reduce) {
     .pcard { transition: none; }
@@ -300,7 +306,7 @@
     <button id="nextflag" title="jump to next decision with >10% attempted-illegal mass (f)">Next flagged</button>
     <input type="range" id="seek" min="0" value="0">
     <span id="stepinfo" class="mono"></span>
-    <span class="hint">Keys: space play/pause · ←/→ step · d next model decision · f next flagged decision. “Attempted illegal” = probability the policy put on rule-breaking options before masking removed them.</span>
+    <span class="hint">Click the board or press space to play/pause · ←/→ step · d next model decision · f next flagged decision. “Attempted illegal” = probability the policy put on rule-breaking options before masking removed them.</span>
   </footer>
 </div>
 
@@ -490,7 +496,11 @@ function pTag(pid) { return `<span class="twho" style="color:var(${PVAR[pid]})">
 function renderTrade(f) {
   const tr = f.s.tr;
   const ev = TRADE_EVENTS[f.at];
-  if (!tr && !ev) { tradeCard.classList.remove("on"); return; }
+  if (!tr && !ev) {
+    tradeCard.classList.remove("on");
+    tradeBody.innerHTML = '<div class="tidle">no active negotiation</div>';
+    return;
+  }
   tradeCard.classList.add("on");
   let html = "";
   if (tr) {
@@ -612,7 +622,12 @@ function render() {
   if (idx >= 1) {
     const row = logRows[idx - 1];
     row.classList.add("cur");
-    row.scrollIntoView({block: "nearest"});
+    // Scroll ONLY the log container. scrollIntoView also scrolls every other
+    // scrollable ancestor, which yanked the whole layout around on each step
+    // at high playback speeds.
+    const top = row.offsetTop, bottom = top + row.offsetHeight;
+    if (top < logDiv.scrollTop || bottom > logDiv.scrollTop + logDiv.clientHeight)
+      logDiv.scrollTop = top - Math.floor(logDiv.clientHeight / 2);
     lastCur = row;
   }
 }
@@ -634,6 +649,10 @@ function jump(pred) {
   for (let i = idx + 1; i <= N; i++) if (pred(F[i])) { pause(); go(i); return; }
 }
 document.getElementById("play").onclick = () => playing ? pause() : play();
+// The board is the biggest click target on screen -- let it toggle playback,
+// so pausing at high speed never requires hitting a small moving button.
+document.getElementById("boardwrap").addEventListener("click", () => playing ? pause() : play());
+document.getElementById("boardwrap").style.cursor = "pointer";
 document.getElementById("prev").onclick = () => { pause(); go(idx - 1); };
 document.getElementById("next").onclick = () => { pause(); go(idx + 1); };
 document.getElementById("nextdec").onclick = () => jump(f => !!f.d);
