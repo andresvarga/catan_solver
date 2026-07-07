@@ -35,6 +35,53 @@ from training.model import flatten_observation
 MAX_STEPS = 4000
 
 
+def encode_decision(state, actor: int, acts, chosen, public_hand_features: bool) -> dict:
+    """Encode one (state, demonstrated action) pair into the head_data-shaped
+    supervised target `evaluate_actions`/`prepare_transition_batch` consume.
+    Shared by heuristic-self-play collection and DAgger collection (where the
+    demonstrated action comes from the expert but the state came from the
+    learner's own rollout)."""
+    by_type = group_by_type(acts)
+    actions_of_type = by_type[chosen.type]
+    stage1_head, stage2_head = TYPE_TO_HEADS[chosen.type]
+    idx1, idx2 = action_to_indices(chosen.type, actions_of_type, chosen)
+
+    type_mask = np.zeros(NUM_ACTION_TYPES, dtype=np.float32)
+    for t in by_type:
+        type_mask[ACTION_TYPE_INDEX[t]] = 1.0
+    mask1 = _pad(stage1_mask(chosen.type, actions_of_type)) if stage1_head else np.zeros(SUBMASK_PAD, dtype=np.float32)
+    mask2 = (_pad(stage2_mask(chosen.type, actions_of_type, idx1)) if stage2_head
+             else np.zeros(SUBMASK_PAD, dtype=np.float32))
+
+    obs = build_observation(state, actor, acts, show_mask=True,
+                             public_hand_features=public_hand_features)
+    return {
+        "obs": flatten_observation(obs),
+        "type_mask": type_mask,
+        "type_idx": ACTION_TYPE_INDEX[chosen.type],
+        "head1_id": HEAD_NAME_INDEX[stage1_head] if stage1_head else -1,
+        "sub_mask_1": mask1,
+        "sub_idx_1": idx1 if idx1 is not None else -1,
+        "head2_id": HEAD_NAME_INDEX[stage2_head] if stage2_head else -1,
+        "sub_mask_2": mask2,
+        "sub_idx_2": idx2 if idx2 is not None else -1,
+    }
+
+
+def records_to_arrays(records: list[dict]) -> dict[str, np.ndarray]:
+    return {
+        "obs": np.stack([r["obs"] for r in records]).astype(np.float32),
+        "type_mask": np.stack([r["type_mask"] for r in records]).astype(np.float32),
+        "type_idx": np.array([r["type_idx"] for r in records], dtype=np.int64),
+        "head1_id": np.array([r["head1_id"] for r in records], dtype=np.int64),
+        "sub_mask_1": np.stack([r["sub_mask_1"] for r in records]).astype(np.float32),
+        "sub_idx_1": np.array([r["sub_idx_1"] for r in records], dtype=np.int64),
+        "head2_id": np.array([r["head2_id"] for r in records], dtype=np.int64),
+        "sub_mask_2": np.stack([r["sub_mask_2"] for r in records]).astype(np.float32),
+        "sub_idx_2": np.array([r["sub_idx_2"] for r in records], dtype=np.int64),
+    }
+
+
 def play_and_record(seed: int, public_hand_features: bool) -> list[dict]:
     engine = CatanEngine(randomize_board=True, seed=seed)
     agents = {i: HeuristicAgent(i, random.Random(seed * 97 + i)) for i in range(NUM_PLAYERS)}
@@ -46,31 +93,7 @@ def play_and_record(seed: int, public_hand_features: bool) -> list[dict]:
         acts = legal_actions(state)
         chosen = agents[actor].choose(state, acts)
         if len(acts) > 1:
-            by_type = group_by_type(acts)
-            actions_of_type = by_type[chosen.type]
-            stage1_head, stage2_head = TYPE_TO_HEADS[chosen.type]
-            idx1, idx2 = action_to_indices(chosen.type, actions_of_type, chosen)
-
-            type_mask = np.zeros(NUM_ACTION_TYPES, dtype=np.float32)
-            for t in by_type:
-                type_mask[ACTION_TYPE_INDEX[t]] = 1.0
-            mask1 = _pad(stage1_mask(chosen.type, actions_of_type)) if stage1_head else np.zeros(SUBMASK_PAD, dtype=np.float32)
-            mask2 = (_pad(stage2_mask(chosen.type, actions_of_type, idx1)) if stage2_head
-                     else np.zeros(SUBMASK_PAD, dtype=np.float32))
-
-            obs = build_observation(state, actor, acts, show_mask=True,
-                                     public_hand_features=public_hand_features)
-            records.append({
-                "obs": flatten_observation(obs),
-                "type_mask": type_mask,
-                "type_idx": ACTION_TYPE_INDEX[chosen.type],
-                "head1_id": HEAD_NAME_INDEX[stage1_head] if stage1_head else -1,
-                "sub_mask_1": mask1,
-                "sub_idx_1": idx1 if idx1 is not None else -1,
-                "head2_id": HEAD_NAME_INDEX[stage2_head] if stage2_head else -1,
-                "sub_mask_2": mask2,
-                "sub_idx_2": idx2 if idx2 is not None else -1,
-            })
+            records.append(encode_decision(state, actor, acts, chosen, public_hand_features))
         engine.step(chosen)
         steps += 1
     return records
@@ -118,17 +141,7 @@ def main():
     n = len(records)
     print(f"{args.games} games -> {n} decisions in {elapsed:.1f}s ({n/elapsed:.0f} decisions/s)")
 
-    arrays = {
-        "obs": np.stack([r["obs"] for r in records]).astype(np.float32),
-        "type_mask": np.stack([r["type_mask"] for r in records]).astype(np.float32),
-        "type_idx": np.array([r["type_idx"] for r in records], dtype=np.int64),
-        "head1_id": np.array([r["head1_id"] for r in records], dtype=np.int64),
-        "sub_mask_1": np.stack([r["sub_mask_1"] for r in records]).astype(np.float32),
-        "sub_idx_1": np.array([r["sub_idx_1"] for r in records], dtype=np.int64),
-        "head2_id": np.array([r["head2_id"] for r in records], dtype=np.int64),
-        "sub_mask_2": np.stack([r["sub_mask_2"] for r in records]).astype(np.float32),
-        "sub_idx_2": np.array([r["sub_idx_2"] for r in records], dtype=np.int64),
-    }
+    arrays = records_to_arrays(records)
     np.savez(args.out, **arrays)
     size_mb = sum(a.nbytes for a in arrays.values()) / 1e6
     print(f"wrote {args.out} ({size_mb:.0f} MB)")
