@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catan replay — model debug viewer</title>
+</head>
+<body>
+<!--ARTIFACT_START-->
+<style>
+  :root {
+    --surface: #fcfcfb;
+    --panel: #f4f3f0;
+    --panel-2: #eceae5;
+    --border: #dcd9d2;
+    --ink: #191813;
+    --ink-2: #5c594f;
+    --ink-3: #8b8779;
+    --accent: #2a78d6;
+    --bad: #c0392b;
+    --good: #1a7f37;
+    --sea: #dfe8ec;
+    --p0: #2a78d6; --p1: #eda100; --p2: #4a3aa7; --p3: #e34948;
+    --t-wood: #3d7a4a; --t-brick: #b8593a; --t-sheep: #a9c46c;
+    --t-wheat: #e3b93f; --t-ore: #9aa2ab; --t-desert: #d9cba8;
+    --token-hot: #b03a2e;
+    --shadow: 0 1px 3px rgba(20,18,10,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --panel: #232320;
+      --panel-2: #2c2c28;
+      --border: #3a3934;
+      --ink: #f0efe9;
+      --ink-2: #b6b3a6;
+      --ink-3: #83806f;
+      --accent: #3987e5;
+      --bad: #e66767;
+      --good: #57ab5a;
+      --sea: #20272b;
+      --p0: #3987e5; --p1: #c98500; --p2: #9085e9; --p3: #e66767;
+      --t-wood: #35673f; --t-brick: #9c4c32; --t-sheep: #7f9b4a;
+      --t-wheat: #b5922f; --t-ore: #767e88; --t-desert: #8f8462;
+      --token-hot: #e66767;
+      --shadow: 0 1px 3px rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="light"] {
+    --surface: #fcfcfb; --panel: #f4f3f0; --panel-2: #eceae5; --border: #dcd9d2;
+    --ink: #191813; --ink-2: #5c594f; --ink-3: #8b8779; --accent: #2a78d6;
+    --bad: #c0392b; --good: #1a7f37; --sea: #dfe8ec;
+    --p0: #2a78d6; --p1: #eda100; --p2: #4a3aa7; --p3: #e34948;
+    --t-wood: #3d7a4a; --t-brick: #b8593a; --t-sheep: #a9c46c;
+    --t-wheat: #e3b93f; --t-ore: #9aa2ab; --t-desert: #d9cba8;
+    --token-hot: #b03a2e; --shadow: 0 1px 3px rgba(20,18,10,.12);
+  }
+  :root[data-theme="dark"] {
+    --surface: #1a1a19; --panel: #232320; --panel-2: #2c2c28; --border: #3a3934;
+    --ink: #f0efe9; --ink-2: #b6b3a6; --ink-3: #83806f; --accent: #3987e5;
+    --bad: #e66767; --good: #57ab5a; --sea: #20272b;
+    --p0: #3987e5; --p1: #c98500; --p2: #9085e9; --p3: #e66767;
+    --t-wood: #35673f; --t-brick: #9c4c32; --t-sheep: #7f9b4a;
+    --t-wheat: #b5922f; --t-ore: #767e88; --t-desert: #8f8462;
+    --token-hot: #e66767; --shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--surface); color: var(--ink);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #app {
+    display: grid; height: 100vh; min-height: 560px;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 0;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  /* header */
+  header {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 10px 16px 8px; border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .01em; }
+  header .sub { color: var(--ink-2); font-size: 12.5px; }
+  header .result { margin-left: auto; font-size: 12.5px; color: var(--ink-2); }
+  header .result b { color: var(--ink); }
+  .chip { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+
+  /* main grid */
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) 372px;
+    gap: 12px; padding: 12px 16px; min-height: 0;
+  }
+  #boardwrap {
+    background: var(--sea); border: 1px solid var(--border); border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; min-height: 0;
+    position: relative; overflow: hidden;
+  }
+  #board { width: 100%; height: 100%; display: block; }
+  #dicebadge {
+    position: absolute; top: 10px; left: 12px;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel); border: 2px solid var(--border); border-radius: 10px;
+    padding: 6px 12px; box-shadow: var(--shadow);
+    transition: border-color .15s, transform .15s;
+  }
+  #dicebadge.rolled { border-color: var(--accent); transform: scale(1.06); }
+  #dicebadge.seven { border-color: var(--bad); transform: scale(1.06); }
+  .die {
+    width: 26px; height: 26px; border-radius: 6px; background: var(--ink);
+    display: grid; grid-template: repeat(3, 1fr) / repeat(3, 1fr);
+    padding: 4px; gap: 1px; flex: none;
+  }
+  .die i { border-radius: 50%; background: transparent; }
+  .die i.on { background: var(--surface); }
+  #dicetotal { font-size: 17px; font-weight: 750; color: var(--ink); }
+  #dicenote { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-3); }
+  #dicebadge.seven #dicenote { color: var(--bad); font-weight: 700; }
+  @media (prefers-reduced-motion: reduce) { #dicebadge { transition: none; transform: none !important; } }
+  #phasebadge {
+    position: absolute; top: 10px; right: 12px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 4px 10px; font-size: 11.5px; letter-spacing: .06em; color: var(--ink-2);
+    text-transform: uppercase; box-shadow: var(--shadow);
+  }
+
+  /* right column */
+  #side { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 10px; min-height: 0; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .card h2 {
+    margin: 0 0 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 650;
+  }
+
+  /* players */
+  #players { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pcard {
+    border: 1px solid var(--border); border-left: 4px solid var(--pc);
+    border-radius: 8px; padding: 6px 8px; background: var(--panel-2);
+    transition: box-shadow .15s;
+  }
+  .pcard.acting { box-shadow: 0 0 0 2px var(--pc); }
+  .pcard .prow { display: flex; align-items: baseline; gap: 6px; }
+  .pcard .pname { font-weight: 650; font-size: 12.5px; }
+  .pcard .pkind { color: var(--ink-3); font-size: 11px; }
+  .pcard .pvp { margin-left: auto; font-size: 16px; font-weight: 700; }
+  .pcard .pvp small { font-size: 10px; color: var(--ink-3); font-weight: 500; }
+  .res { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
+  .r {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 11px; padding: 1px 5px; border-radius: 5px;
+    background: var(--panel); border: 1px solid var(--border); color: var(--ink-2);
+  }
+  .r i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .pmeta { display: flex; gap: 8px; margin-top: 4px; font-size: 10.5px; color: var(--ink-3); }
+  .badge {
+    font-size: 9.5px; padding: 0 5px; border-radius: 4px; letter-spacing: .04em;
+    border: 1px solid var(--border); background: var(--panel); color: var(--ink-2);
+  }
+
+  /* dev card chips */
+  .devrow { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; align-items: center; }
+  .devrow .dlab { font-size: 10px; color: var(--ink-3); letter-spacing: .05em; text-transform: uppercase; }
+  .dv {
+    display: inline-flex; align-items: center; gap: 2px; font-size: 10.5px; font-weight: 650;
+    padding: 1px 5px; border-radius: 5px; border: 1px solid var(--pc);
+    background: var(--panel); color: var(--ink);
+  }
+  .dv small { font-weight: 500; color: var(--ink-3); }
+
+  /* trade banner */
+  #trade { display: none; border-left: 4px solid var(--accent); }
+  #trade.on { display: block; }
+  #trade .trow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; margin: 3px 0; }
+  #trade .tarrow { color: var(--ink-3); font-size: 13px; }
+  #trade .twho { font-weight: 700; }
+  .tresp { font-size: 11.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--ink-2); }
+  .tresp.acc { border-color: var(--good); color: var(--good); font-weight: 650; }
+  .tresp.rej { border-color: var(--bad); color: var(--bad); }
+  #trade .tevent { margin-top: 5px; font-size: 12px; font-weight: 650; }
+  #trade .tevent.good { color: var(--good); }
+  #trade .tevent.bad { color: var(--bad); }
+
+  /* diagnostics */
+  #diag .empty { color: var(--ink-3); font-size: 12.5px; }
+  .drow { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; }
+  .drow .lbl { width: 118px; color: var(--ink-2); flex: none; }
+  .drow .val { width: 52px; text-align: right; flex: none; }
+  .meter { flex: 1; height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+  .meter > span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+  .meter.warn > span { background: var(--bad); }
+  .dsec { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); }
+  .dsec .dsh { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 3px; }
+  .stale { color: var(--ink-3); font-size: 11px; margin-bottom: 6px; }
+  .flag { color: var(--bad); font-weight: 650; }
+
+  /* log */
+  #logcard { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+  #log { overflow-y: auto; font-size: 12px; min-height: 0; }
+  .lrow {
+    display: flex; gap: 7px; padding: 1.5px 6px; border-radius: 5px; cursor: pointer;
+    align-items: baseline;
+  }
+  .lrow:hover { background: var(--panel-2); }
+  .lrow.cur { background: var(--panel-2); outline: 1px solid var(--border); }
+  .lrow .ln { color: var(--ink-3); width: 42px; flex: none; text-align: right; }
+  .lrow .lp { width: 24px; flex: none; font-weight: 650; }
+  .lrow .la { color: var(--ink-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow.model .la { color: var(--ink); }
+  .lrow .lim { margin-left: auto; flex: none; color: var(--bad); font-size: 10.5px; }
+
+  /* transport */
+  footer {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 16px; border-top: 1px solid var(--border); background: var(--panel);
+  }
+  button {
+    font: inherit; color: var(--ink); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 7px; padding: 5px 11px; cursor: pointer;
+  }
+  button:hover { border-color: var(--ink-3); }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; min-width: 74px; font-weight: 650; }
+  select { font: inherit; background: var(--panel-2); color: var(--ink); border: 1px solid var(--border); border-radius: 7px; padding: 4px 6px; }
+  #seek { flex: 1; min-width: 160px; accent-color: var(--accent); }
+  #stepinfo { color: var(--ink-2); font-size: 12.5px; min-width: 170px; }
+  #stepinfo b { color: var(--ink); }
+  .hint { color: var(--ink-3); font-size: 11px; flex-basis: 100%; }
+
+  @media (max-width: 940px) {
+    main { grid-template-columns: 1fr; grid-template-rows: minmax(320px, 55vh) auto; overflow-y: auto; }
+    #app { height: auto; }
+    #side { grid-template-rows: auto auto auto 300px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pcard { transition: none; }
+  }
+</style>
+
+<div id="app">
+  <header>
+    <h1>Catan replay</h1>
+    <span class="sub mono" id="metaline"></span>
+    <span class="result" id="resultline"></span>
+  </header>
+
+  <main>
+    <div id="boardwrap">
+      <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="dicebadge">
+        <span class="die" id="die1"></span><span class="die" id="die2"></span>
+        <span><span id="dicetotal" class="mono">—</span><br><span id="dicenote">last roll</span></span>
+      </div>
+      <div id="phasebadge">SETUP</div>
+    </div>
+
+    <div id="side">
+      <div class="card">
+        <h2>Players</h2>
+        <div id="players"></div>
+        <div class="pmeta" style="margin-top:6px" id="bankline"></div>
+      </div>
+
+      <div class="card" id="trade">
+        <h2>Trade negotiation</h2>
+        <div id="tradebody"></div>
+      </div>
+
+      <div class="card" id="diag">
+        <h2>Model decision</h2>
+        <div id="diagbody"><div class="empty">No model decision yet — press play.</div></div>
+      </div>
+
+      <div class="card" id="logcard">
+        <h2>Action log</h2>
+        <div id="log" class="mono"></div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <button id="prev" title="step back (←)">◀</button>
+    <button id="play" class="primary" title="space">Play</button>
+    <button id="next" title="step forward (→)">▶</button>
+    <select id="speed" title="playback speed">
+      <option value="0.5">0.5 steps/s</option>
+      <option value="1">1 step/s</option>
+      <option value="2">2 steps/s</option>
+      <option value="6" selected>6 steps/s</option>
+      <option value="15">15 steps/s</option>
+      <option value="40">40 steps/s</option>
+    </select>
+    <button id="nextdec" title="jump to next model decision (d)">Next decision</button>
+    <button id="nextflag" title="jump to next decision with >10% attempted-illegal mass (f)">Next flagged</button>
+    <input type="range" id="seek" min="0" value="0">
+    <span id="stepinfo" class="mono"></span>
+    <span class="hint">Keys: space play/pause · ←/→ step · d next model decision · f next flagged decision. “Attempted illegal” = probability the policy put on rule-breaking options before masking removed them.</span>
+  </footer>
+</div>
+
+<script>
+const R = __REPLAY_JSON__;
+const RES = ["wood","brick","sheep","wheat","ore"];
+const RES_VAR = {wood:"--t-wood", brick:"--t-brick", sheep:"--t-sheep", wheat:"--t-wheat", ore:"--t-ore"};
+const PVAR = ["--p0","--p1","--p2","--p3"];
+const F = R.frames;
+const N = F.length - 1;
+
+// ---- header ----
+document.getElementById("metaline").textContent =
+  `${R.meta.checkpoint} · seat P${R.meta.seat} · seed ${R.meta.seed} · vs ${R.meta.opponents} x3`;
+const res = R.meta.result;
+document.getElementById("resultline").innerHTML =
+  res.winner === null
+    ? `no winner (truncated at ${res.steps} steps) · final VP ${res.vps.join(" / ")}`
+    : `<b>P${res.winner} wins</b> in ${res.turns} turns (${res.steps} steps) · VP ${res.vps.join(" / ")}`;
+
+// ---- board (static once, dynamic per frame) ----
+const svg = document.getElementById("board");
+const XS = Object.values(R.board.vertices).map(v => v[0]);
+const YS = Object.values(R.board.vertices).map(v => v[1]);
+const pad = 9;
+const minX = Math.min(...XS) - pad, maxX = Math.max(...XS) + pad;
+const minY = Math.min(...YS) - pad, maxY = Math.max(...YS) + pad;
+svg.setAttribute("viewBox", `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
+
+function el(name, attrs, parent) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  (parent || svg).appendChild(e);
+  return e;
+}
+const gHex = el("g", {}), gStatic = el("g", {}), gDyn = el("g", {}), gHl = el("g", {});
+
+for (const h of R.board.hexes) {
+  const pts = h.corners.map(c => c.join(",")).join(" ");
+  el("polygon", {points: pts, fill: `var(${RES_VAR[h.terrain] || "--t-desert"})`,
+                 stroke: "var(--surface)", "stroke-width": .9, "data-hex": h.id}, gHex);
+  if (h.number !== null) {
+    el("circle", {cx: h.cx, cy: h.cy, r: 2.9, fill: "var(--surface)",
+                  stroke: "var(--border)", "stroke-width": .25}, gHex);
+    const hot = (h.number === 6 || h.number === 8);
+    const t = el("text", {x: h.cx, y: h.cy + 1.15, "text-anchor": "middle",
+                          "font-size": 3.1, "font-weight": hot ? 800 : 600,
+                          fill: hot ? "var(--token-hot)" : "var(--ink)"}, gHex);
+    t.textContent = h.number;
+    const pips = {2:1,3:2,4:3,5:4,6:5,8:5,9:4,10:3,11:2,12:1}[h.number] || 0;
+    for (let i = 0; i < pips; i++)
+      el("circle", {cx: h.cx + (i - (pips-1)/2) * 0.85, cy: h.cy + 1.95, r: .3,
+                    fill: hot ? "var(--token-hot)" : "var(--ink-2)"}, gHex);
+  }
+}
+for (const p of R.board.ports) {
+  const [x, y] = R.board.vertices[p.vid];
+  const n = Math.hypot(x, y) || 1;
+  const dx = x / n, dy = y / n;
+  const px = x + dx * 4.6, py = y + dy * 4.6;
+  const generic = p.kind === "any";
+  const stroke = generic ? "var(--ink-3)" : `var(${RES_VAR[p.kind]})`;
+  // pier line from the vertex out to the port marker
+  el("line", {x1: x, y1: y, x2: px, y2: py, stroke: stroke, "stroke-width": .5}, gStatic);
+  // marker pill: ratio text + resource swatch
+  el("rect", {x: px - 3.1, y: py - 1.9, width: 6.2, height: 3.8, rx: 1.1,
+              fill: "var(--panel)", stroke: stroke, "stroke-width": .55}, gStatic);
+  const t = el("text", {x: px + (generic ? 0 : -.7), y: py + .95, "text-anchor": "middle",
+                        "font-size": 2.3, fill: "var(--ink)", "font-weight": 750}, gStatic);
+  t.textContent = generic ? "3:1" : "2:1";
+  if (!generic)
+    el("rect", {x: px + 1.2, y: py - .95, width: 1.9, height: 1.9, rx: .45,
+                fill: `var(${RES_VAR[p.kind]})`, stroke: "var(--surface)", "stroke-width": .25}, gStatic);
+  // anchor dot on the port vertex itself
+  el("circle", {cx: x, cy: y, r: .7, fill: stroke}, gStatic);
+}
+
+function renderBoard(f) {
+  gDyn.innerHTML = ""; gHl.innerHTML = "";
+  const s = f.s;
+  // roads: surface casing then color
+  for (const [eid, pid] of s.r) {
+    const [a, b] = R.board.edges[eid];
+    const [x1, y1] = R.board.vertices[a], [x2, y2] = R.board.vertices[b];
+    const sh = 0.22; // shorten toward center so junction vertices stay readable
+    const mx1 = x1 + (x2-x1)*sh, my1 = y1 + (y2-y1)*sh;
+    const mx2 = x2 + (x1-x2)*sh, my2 = y2 + (y1-y2)*sh;
+    el("line", {x1: mx1, y1: my1, x2: mx2, y2: my2, stroke: "var(--surface)",
+                "stroke-width": 2.5, "stroke-linecap": "round"}, gDyn);
+    el("line", {x1: mx1, y1: my1, x2: mx2, y2: my2, stroke: `var(${PVAR[pid]})`,
+                "stroke-width": 1.6, "stroke-linecap": "round"}, gDyn);
+  }
+  // buildings
+  for (const [vid, pid, kind] of s.b) {
+    const [x, y] = R.board.vertices[vid];
+    if (kind === 1) {
+      el("rect", {x: x-1.6, y: y-1.6, width: 3.2, height: 3.2, rx: .5,
+                  fill: `var(${PVAR[pid]})`, stroke: "var(--surface)", "stroke-width": .55}, gDyn);
+    } else {
+      el("polygon", {points: `${x},${y-2.5} ${x+2.5},${y} ${x},${y+2.5} ${x-2.5},${y}`,
+                     fill: `var(${PVAR[pid]})`, stroke: "var(--surface)", "stroke-width": .55}, gDyn);
+    }
+  }
+  // robber
+  const rh = R.board.hexes.find(h => h.id === s.rob);
+  if (rh) {
+    el("circle", {cx: rh.cx, cy: rh.cy - 3.3, r: 1.7, fill: "var(--ink)",
+                  stroke: "var(--surface)", "stroke-width": .4, opacity: .92}, gDyn);
+    const t = el("text", {x: rh.cx, y: rh.cy - 2.6, "text-anchor": "middle",
+                          "font-size": 2.0, fill: "var(--surface)", "font-weight": 800}, gDyn);
+    t.textContent = "R";
+  }
+  // last-action highlight
+  const tg = f.tg;
+  if (tg) {
+    if (tg.v !== undefined) {
+      const [x, y] = R.board.vertices[tg.v];
+      el("circle", {cx: x, cy: y, r: 3.1, fill: "none", stroke: "var(--ink)",
+                    "stroke-width": .45, "stroke-dasharray": "1 .7"}, gHl);
+    } else if (tg.e !== undefined) {
+      const [a, b] = R.board.edges[tg.e];
+      const [x1, y1] = R.board.vertices[a], [x2, y2] = R.board.vertices[b];
+      el("circle", {cx: (x1+x2)/2, cy: (y1+y2)/2, r: 2.6, fill: "none", stroke: "var(--ink)",
+                    "stroke-width": .45, "stroke-dasharray": "1 .7"}, gHl);
+    } else if (tg.h !== undefined) {
+      const hh = R.board.hexes.find(h => h.id === tg.h);
+      if (hh) el("polygon", {points: hh.corners.map(c => c.join(",")).join(" "),
+                             fill: "none", stroke: "var(--ink)", "stroke-width": .6,
+                             "stroke-dasharray": "1.4 1"}, gHl);
+    }
+  }
+}
+
+// ---- players panel ----
+const playersDiv = document.getElementById("players");
+const DEV = [["K", "Knight"], ["RB", "Road Building"], ["YP", "Year of Plenty"],
+             ["M", "Monopoly"], ["VP", "Victory Point card"]];
+function renderPlayers(f) {
+  const s = f.s;
+  playersDiv.innerHTML = s.p.map((pv, pid) => {
+    const hand = pv[0]+pv[1]+pv[2]+pv[3]+pv[4];
+    const acting = f.a === pid;
+    const dev = s.dev[pid];
+    const devChips = dev.map((n, i) => n > 0
+      ? `<span class="dv" title="${DEV[i][1]} x${n}">${DEV[i][0]}<small>×${n}</small></span>` : "")
+      .join("");
+    return `<div class="pcard ${acting ? "acting" : ""}" style="--pc:var(${PVAR[pid]})">
+      <div class="prow">
+        <span class="pname">P${pid}</span>
+        <span class="pkind">${R.seats[pid]}${acting ? " · acting" : ""}</span>
+        <span class="pvp mono">${pv[6]}<small> VP</small></span>
+      </div>
+      <div class="res mono">${RES.map((r, i) =>
+        `<span class="r"><i style="background:var(${RES_VAR[r]})"></i>${pv[i]}</span>`).join("")}
+      </div>
+      <div class="devrow"><span class="dlab">dev</span>${devChips ||
+        '<span class="dlab" style="text-transform:none">none</span>'}</div>
+      <div class="pmeta mono">
+        <span>hand ${hand}</span><span>knights ${pv[5]}</span>
+        ${s.lr === pid ? '<span class="badge">LR +2</span>' : ""}
+        ${s.la === pid ? '<span class="badge">LA +2</span>' : ""}
+      </div>
+    </div>`;
+  }).join("");
+  document.getElementById("bankline").innerHTML =
+    "bank &nbsp;" + RES.map((r, i) =>
+      `<span class="r"><i style="background:var(${RES_VAR[r]})"></i>${s.bank[i]}</span>`).join(" ");
+}
+
+// ---- trade banner ----
+const tradeCard = document.getElementById("trade");
+const tradeBody = document.getElementById("tradebody");
+const TRADE_EVENTS = {
+  accept_trade: ["accepted the offer", "good"],
+  reject_trade: ["declined the offer", "bad"],
+  counter_trade: ["made a counter-offer", ""],
+  confirm_trade: ["trade executed", "good"],
+  cancel_trade: ["cancelled the trade", "bad"],
+  propose_trade: ["proposed a trade", ""],
+};
+function resChips(vec) {
+  return vec.map((n, i) => n > 0
+    ? `<span class="r mono"><i style="background:var(${RES_VAR[RES[i]]})"></i>${n} ${RES[i]}</span>` : "")
+    .join("");
+}
+function pTag(pid) { return `<span class="twho" style="color:var(${PVAR[pid]})">P${pid}</span>`; }
+function renderTrade(f) {
+  const tr = f.s.tr;
+  const ev = TRADE_EVENTS[f.at];
+  if (!tr && !ev) { tradeCard.classList.remove("on"); return; }
+  tradeCard.classList.add("on");
+  let html = "";
+  if (tr) {
+    html += `<div class="trow">${pTag(tr.pr)} offers ${resChips(tr.give)}
+             <span class="tarrow">⇄</span> wants ${resChips(tr.want)}</div>`;
+    const resp = [];
+    for (const pid of tr.acc) resp.push(`<span class="tresp acc">P${pid} accepted</span>`);
+    for (const pid of tr.rem) resp.push(`<span class="tresp">P${pid} deciding…</span>`);
+    if (resp.length) html += `<div class="trow">${resp.join("")}</div>`;
+    else if (!tr.ctr && tr.acc.length === 0)
+      html += `<div class="trow"><span class="tresp rej">all declined — awaiting cancel</span></div>`;
+    if (tr.ctr)
+      html += `<div class="trow">counter by ${pTag(tr.ctr.pr)}: ${resChips(tr.ctr.give)}
+               <span class="tarrow">⇄</span> ${resChips(tr.ctr.want)}
+               <span class="tresp">${"P" + tr.pr} to respond</span></div>`;
+    if (tr.acc.length && tr.rem.length === 0 && !tr.ctr)
+      html += `<div class="trow"><span class="tresp">${"P" + tr.pr} to confirm or cancel</span></div>`;
+  }
+  if (ev) html += `<div class="tevent ${ev[1]}">P${f.a} ${ev[0]}</div>`;
+  tradeBody.innerHTML = html;
+}
+
+// ---- diagnostics panel ----
+const diagBody = document.getElementById("diagbody");
+function meter(label, frac, valText, warn) {
+  const pct = Math.max(0, Math.min(100, frac * 100));
+  return `<div class="drow"><span class="lbl">${label}</span>
+    <span class="meter ${warn ? "warn" : ""}"><span style="width:${pct}%"></span></span>
+    <span class="val mono">${valText}</span></div>`;
+}
+function renderDiag(idx) {
+  let di = idx;
+  while (di > 0 && !F[di].d) di--;
+  const f = F[di];
+  if (!f.d) { diagBody.innerHTML = '<div class="empty">No model decision yet — press play.</div>'; return; }
+  const d = f.d;
+  const stale = di !== idx ? `<div class="stale">latest model decision · step ${di}</div>` : "";
+  const imWarn = d.im > 0.10, im1Warn = d.im1 !== null && d.im1 > 0.10;
+  diagBody.innerHTML = stale +
+    `<div class="drow"><span class="lbl">action</span><span class="mono" style="font-size:12px">${f.act}</span></div>` +
+    meter("chosen type prob", d.cp, d.cp.toFixed(2), false) +
+    meter("value estimate", Math.min(1, Math.abs(d.v)), d.v.toFixed(2), d.v < 0) +
+    meter("type entropy", d.H / 3.0, d.H.toFixed(2), false) +
+    `<div class="drow"><span class="lbl">legal actions</span><span class="val mono" style="text-align:left">${d.n}</span></div>` +
+    `<div class="dsec"><div class="dsh">masked type distribution</div>` +
+    d.top.map(([t, p]) => meter(t.replace(/_/g, " "), p, p.toFixed(2), false)).join("") + `</div>` +
+    `<div class="dsec"><div class="dsh">attempted illegal ${imWarn ? '<span class="flag">▲</span>' : ""}</div>` +
+    meter("type mass (pre-mask)", d.im, (d.im * 100).toFixed(0) + "%", imWarn) +
+    (d.imt.length ? `<div class="drow"><span class="lbl">wanted (illegal)</span>
+       <span class="mono" style="font-size:11px;color:var(--ink-2)">${d.imt.map(([t, p]) =>
+         `${t.replace(/_/g, " ")} ${(p*100).toFixed(0)}%`).join(" · ")}</span></div>` : "") +
+    (d.im1 !== null ? meter("pointer mass (stage 1)", d.im1, (d.im1 * 100).toFixed(0) + "%", im1Warn) : "") +
+    `</div>`;
+}
+
+// ---- log ----
+const logDiv = document.getElementById("log");
+const logRows = [];
+{
+  const fragments = [];
+  for (let i = 1; i <= N; i++) {
+    const f = F[i];
+    const im = f.d && f.d.im > 0.10 ? `<span class="lim">▲${(f.d.im*100).toFixed(0)}%</span>` : "";
+    fragments.push(`<div class="lrow ${f.a === R.meta.seat ? "model" : ""}" data-i="${i}">
+      <span class="ln">${i}</span>
+      <span class="lp" style="color:var(${PVAR[f.a]})">P${f.a}</span>
+      <span class="la">${f.act}</span>${im}</div>`);
+  }
+  logDiv.innerHTML = fragments.join("");
+  logDiv.querySelectorAll(".lrow").forEach(r => logRows.push(r));
+  logDiv.addEventListener("click", e => {
+    const row = e.target.closest(".lrow");
+    if (row) go(parseInt(row.dataset.i, 10));
+  });
+}
+
+// ---- playback ----
+let idx = 0, playing = false, timer = null, lastCur = null;
+const seek = document.getElementById("seek");
+seek.max = N;
+
+const PIPS = {1:[4], 2:[0,8], 3:[0,4,8], 4:[0,2,6,8], 5:[0,2,4,6,8], 6:[0,2,3,5,6,8]};
+function renderDie(elId, v) {
+  const die = document.getElementById(elId);
+  const on = PIPS[v] || [];
+  die.innerHTML = Array.from({length: 9}, (_, i) =>
+    `<i class="${on.includes(i) ? "on" : ""}"></i>`).join("");
+}
+function renderDice(idx) {
+  const badge = document.getElementById("dicebadge");
+  let dice = null, justRolled = false;
+  for (let i = idx; i > 0; i--) if (F[i].dice) { dice = F[i].dice; justRolled = (i === idx); break; }
+  badge.classList.remove("rolled", "seven");
+  if (!dice) {
+    renderDie("die1", 0); renderDie("die2", 0);
+    document.getElementById("dicetotal").textContent = "—";
+    document.getElementById("dicenote").textContent = "no roll yet";
+    return;
+  }
+  renderDie("die1", dice[0]); renderDie("die2", dice[1]);
+  const total = dice[0] + dice[1];
+  document.getElementById("dicetotal").textContent = "= " + total;
+  if (justRolled) {
+    badge.classList.add(total === 7 ? "seven" : "rolled");
+    document.getElementById("dicenote").textContent = total === 7 ? "seven — robber!" : "just rolled";
+  } else {
+    document.getElementById("dicenote").textContent = "last roll";
+  }
+}
+
+function render() {
+  const f = F[idx];
+  renderBoard(f); renderPlayers(f); renderTrade(f); renderDiag(idx); renderDice(idx);
+  document.getElementById("phasebadge").textContent = f.ph || "—";
+  document.getElementById("stepinfo").innerHTML =
+    `step <b>${idx}</b>/${N} · turn <b>${f.s.turn}</b>`;
+  seek.value = idx;
+  if (lastCur) lastCur.classList.remove("cur");
+  if (idx >= 1) {
+    const row = logRows[idx - 1];
+    row.classList.add("cur");
+    row.scrollIntoView({block: "nearest"});
+    lastCur = row;
+  }
+}
+function go(i) { idx = Math.max(0, Math.min(N, i)); render(); }
+function tick() { if (idx >= N) { pause(); return; } go(idx + 1); }
+function play() {
+  if (idx >= N) idx = 0;
+  playing = true;
+  document.getElementById("play").textContent = "Pause";
+  clearInterval(timer);
+  timer = setInterval(tick, 1000 / parseFloat(document.getElementById("speed").value));
+}
+function pause() {
+  playing = false;
+  document.getElementById("play").textContent = "Play";
+  clearInterval(timer);
+}
+function jump(pred) {
+  for (let i = idx + 1; i <= N; i++) if (pred(F[i])) { pause(); go(i); return; }
+}
+document.getElementById("play").onclick = () => playing ? pause() : play();
+document.getElementById("prev").onclick = () => { pause(); go(idx - 1); };
+document.getElementById("next").onclick = () => { pause(); go(idx + 1); };
+document.getElementById("nextdec").onclick = () => jump(f => !!f.d);
+document.getElementById("nextflag").onclick = () => jump(f => f.d && f.d.im > 0.10);
+document.getElementById("speed").onchange = () => { if (playing) play(); };
+seek.oninput = () => { pause(); go(parseInt(seek.value, 10)); };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.code === "Space") { e.preventDefault(); playing ? pause() : play(); }
+  else if (e.key === "ArrowLeft") { pause(); go(idx - 1); }
+  else if (e.key === "ArrowRight") { pause(); go(idx + 1); }
+  else if (e.key === "d") jump(f => !!f.d);
+  else if (e.key === "f") jump(f => f.d && f.d.im > 0.10);
+});
+render();
+</script>
+<!--ARTIFACT_END-->
+</body>
+</html>

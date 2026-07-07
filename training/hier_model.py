@@ -88,6 +88,10 @@ HEAD_SIZES = {
     "vertex": VERTEX_SIZE, "edge": EDGE_SIZE, "hex": HEX_SIZE, "player": PLAYER_SIZE,
     "resource": RESOURCE_SIZE, "resource2": RESOURCE_SIZE, "discard_index": DISCARD_INDEX_SIZE,
 }
+# Stable integer ids for head names so a prepared transition batch can encode
+# "which sub-head was active" as a plain tensor (-1 = no sub-head).
+HEAD_NAMES = ["vertex", "edge", "hex", "player", "resource", "resource2", "discard_index"]
+HEAD_NAME_INDEX = {name: i for i, name in enumerate(HEAD_NAMES)}
 
 
 def group_by_type(legal_actions: list[Action]) -> dict[ActionType, list[Action]]:
@@ -217,15 +221,85 @@ def match_action(action_type: ActionType, actions_of_type: list[Action],
     raise ValueError(f"unhandled action type {action_type}")
 
 
+def action_to_indices(action_type: ActionType, actions_of_type: list[Action],
+                       action: Action) -> tuple[int | None, int | None]:
+    """Inverse of `match_action`: given a concrete Action some other agent
+    (heuristic, random, a human) chose, recover the (idx1, idx2) pointer
+    indices this model's heads would need to reproduce it. Used to turn
+    demonstrations into supervised training targets for behavior cloning --
+    the resulting (idx1, idx2) plug directly into the same head_data shape
+    `model.act()` returns, so a demonstration and a self-generated rollout
+    transition are interchangeable to `evaluate_actions`."""
+    if action_type in NO_PARAM_TYPES:
+        return None, None
+    if action_type in VERTEX_TYPES:
+        return action.params["vertex_id"], None
+    if action_type in EDGE_TYPES:
+        return action.params["edge_id"], None
+    if action_type in HEX_PLAYER_TYPES:
+        victim = action.params["victim"]
+        return action.params["hex_id"], (PLAYER_SIZE - 1 if victim is None else victim)
+    if action_type == ActionType.PLAY_MONOPOLY:
+        return RESOURCE_LIST.index(action.params["resource"]), None
+    if action_type == ActionType.PLAY_YEAR_OF_PLENTY:
+        r1, r2 = action.params["resources"]
+        return RESOURCE_LIST.index(r1), RESOURCE_LIST.index(r2)
+    if action_type == ActionType.MARITIME_TRADE:
+        return RESOURCE_LIST.index(action.params["give"]), RESOURCE_LIST.index(action.params["receive"])
+    if action_type in (ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE):
+        give_r = next(iter(action.params["give"]))
+        want_r = next(iter(action.params["want"]))
+        return RESOURCE_LIST.index(give_r), RESOURCE_LIST.index(want_r)
+    if action_type == ActionType.CONFIRM_TRADE:
+        return action.params["target"], None
+    if action_type == ActionType.DISCARD:
+        return actions_of_type.index(action), None
+    raise ValueError(f"unhandled action type {action_type}")
+
+
 def _pad(mask: np.ndarray) -> np.ndarray:
     out = np.zeros(SUBMASK_PAD, dtype=np.float32)
     out[: len(mask)] = mask
     return out
 
 
-def _masked_categorical(logits: torch.Tensor, mask: torch.Tensor) -> Categorical:
-    logits = logits.masked_fill(mask == 0, NEG_INF)
-    return Categorical(logits=logits)
+def masked_sample(logits: torch.Tensor, mask: torch.Tensor, deterministic: bool) -> tuple[int, float]:
+    """Sample (or argmax) from a masked categorical without constructing a
+    torch.distributions.Categorical -- profiling showed the Distribution
+    machinery (arg validation, constraint checks, dispatch) dominates
+    single-sample rollout inference, while the math itself is three ops.
+    `logits`/`mask` are 1-D. Returns (index, log-prob of that index).
+    Gradient-free by design (`act` is rollout-side only; the gradient path
+    recomputes log-probs in `evaluate_actions`), hence the detach."""
+    logits = logits.detach().masked_fill(mask == 0, NEG_INF)
+    logp = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+    if deterministic:
+        idx = int(torch.argmax(logits))
+    else:
+        idx = int(torch.multinomial(torch.exp(logp), 1))
+    return idx, float(logp[idx])
+
+
+def prepare_transition_batch(transitions: list[dict], device: str) -> dict[str, torch.Tensor]:
+    """Convert stored per-transition head data (numpy masks + python ints)
+    into one dict of device tensors, built once per rollout instead of once
+    per minibatch per epoch inside `evaluate_actions`. Consumed by both
+    `HierarchicalActorCritic.evaluate_actions` and the GNN model's."""
+    head_ids = {1: [], 2: []}
+    for t in transitions:
+        for stage, key in ((1, "stage1_head"), (2, "stage2_head")):
+            name = t[key]
+            head_ids[stage].append(-1 if name is None else HEAD_NAME_INDEX[name])
+    return {
+        "type_mask": torch.as_tensor(np.array([t["type_mask"] for t in transitions]), device=device),
+        "type_idx": torch.tensor([t["type_idx"] for t in transitions], dtype=torch.long, device=device),
+        "head1_id": torch.tensor(head_ids[1], dtype=torch.long, device=device),
+        "sub_mask_1": torch.as_tensor(np.array([t["sub_mask_1"] for t in transitions]), device=device),
+        "sub_idx_1": torch.tensor([t["sub_idx_1"] for t in transitions], dtype=torch.long, device=device),
+        "head2_id": torch.tensor(head_ids[2], dtype=torch.long, device=device),
+        "sub_mask_2": torch.as_tensor(np.array([t["sub_mask_2"] for t in transitions]), device=device),
+        "sub_idx_2": torch.tensor([t["sub_idx_2"] for t in transitions], dtype=torch.long, device=device),
+    }
 
 
 class HierarchicalActorCritic(nn.Module):
@@ -255,8 +329,10 @@ class HierarchicalActorCritic(nn.Module):
         return self.trunk(obs_batch)
 
     def value(self, obs_batch: torch.Tensor) -> torch.Tensor:
-        """Value-only forward pass, used to bootstrap GAE at a truncated
-        (not truly terminal) episode boundary without sampling an action."""
+        """Value-only forward pass (no action sampling). Not used by the
+        training loop anymore -- truncation is treated as terminal in
+        compute_gae, so nothing bootstraps from it -- but kept as a cheap
+        utility for analysis and future centralized-critic work."""
         feats = self.features(obs_batch)
         return self.value_head(feats).squeeze(-1)
 
@@ -271,13 +347,10 @@ class HierarchicalActorCritic(nn.Module):
         type_mask = np.zeros(NUM_ACTION_TYPES, dtype=np.float32)
         for t in by_type:
             type_mask[ACTION_TYPE_INDEX[t]] = 1.0
-        type_mask_t = torch.tensor(type_mask, device=device)
+        type_mask_t = torch.as_tensor(type_mask, device=device)
 
         type_logits = self.type_head(feats).squeeze(0)
-        type_dist = _masked_categorical(type_logits, type_mask_t)
-        type_idx = (int(torch.argmax(type_dist.logits).item()) if deterministic
-                    else int(type_dist.sample().item()))
-        logprob = type_dist.log_prob(torch.tensor(type_idx, device=device))
+        type_idx, logprob = masked_sample(type_logits, type_mask_t, deterministic)
 
         chosen_type = ACTION_TYPES[type_idx]
         actions_of_type = by_type[chosen_type]
@@ -290,17 +363,15 @@ class HierarchicalActorCritic(nn.Module):
         if stage1_head is not None:
             mask1 = stage1_mask(chosen_type, actions_of_type)
             logits1 = self._head_modules[stage1_head](feats).squeeze(0)
-            dist1 = _masked_categorical(logits1, torch.tensor(mask1, device=device))
-            idx1 = int(torch.argmax(dist1.logits).item()) if deterministic else int(dist1.sample().item())
-            logprob = logprob + dist1.log_prob(torch.tensor(idx1, device=device))
+            idx1, lp1 = masked_sample(logits1, torch.as_tensor(mask1, device=device), deterministic)
+            logprob += lp1
             mask1_padded = _pad(mask1)
 
             if stage2_head is not None:
                 mask2 = stage2_mask(chosen_type, actions_of_type, idx1)
                 logits2 = self._head_modules[stage2_head](feats).squeeze(0)
-                dist2 = _masked_categorical(logits2, torch.tensor(mask2, device=device))
-                idx2 = int(torch.argmax(dist2.logits).item()) if deterministic else int(dist2.sample().item())
-                logprob = logprob + dist2.log_prob(torch.tensor(idx2, device=device))
+                idx2, lp2 = masked_sample(logits2, torch.as_tensor(mask2, device=device), deterministic)
+                logprob += lp2
                 mask2_padded = _pad(mask2)
 
         result_action = match_action(chosen_type, actions_of_type,
@@ -313,23 +384,27 @@ class HierarchicalActorCritic(nn.Module):
             "sub_mask_1": mask1_padded, "sub_idx_1": idx1,
             "sub_mask_2": mask2_padded, "sub_idx_2": idx2,
         }
-        return result_action, float(logprob.item()), float(value.item()), head_data
+        return result_action, logprob, float(value.item()), head_data
 
-    def evaluate_actions(self, obs_batch: torch.Tensor, transitions: list[dict]) -> tuple[
+    def evaluate_actions(self, obs_batch: torch.Tensor, transitions) -> tuple[
             torch.Tensor, torch.Tensor, torch.Tensor]:
         """Batched recomputation of (logprob, entropy, value) for stored transitions
         under the *current* parameters -- the PPO importance-ratio side. Groups
         rows by which head was active at each stage so the sub-head forward
-        passes stay vectorized instead of looping per-transition."""
+        passes stay vectorized instead of looping per-transition.
+
+        `transitions` is either a prepared tensor batch (see
+        `prepare_transition_batch` -- what `ppo_update` passes, built once per
+        rollout) or a raw list of transition dicts (converted here, kept for
+        tests/ad-hoc callers)."""
         feats = self.features(obs_batch)  # (N, hidden)
         n = feats.shape[0]
         device = feats.device
+        tb = transitions if isinstance(transitions, dict) else prepare_transition_batch(transitions, device)
 
-        type_masks = torch.tensor(np.array([t["type_mask"] for t in transitions]), device=device)
-        type_idxs = torch.tensor([t["type_idx"] for t in transitions], dtype=torch.long, device=device)
-        type_logits = self.type_head(feats).masked_fill(type_masks == 0, NEG_INF)
-        type_dist = Categorical(logits=type_logits)
-        logprob = type_dist.log_prob(type_idxs)
+        type_logits = self.type_head(feats).masked_fill(tb["type_mask"] == 0, NEG_INF)
+        type_dist = Categorical(logits=type_logits, validate_args=False)
+        logprob = type_dist.log_prob(tb["type_idx"])
         entropy = type_dist.entropy()
 
         value = self.value_head(feats).squeeze(-1)
@@ -337,23 +412,19 @@ class HierarchicalActorCritic(nn.Module):
         extra_logprob = torch.zeros(n, device=device)
         extra_entropy = torch.zeros(n, device=device)
 
-        for stage, mask_key, idx_key, head_key in (
-            (1, "sub_mask_1", "sub_idx_1", "stage1_head"),
-            (2, "sub_mask_2", "sub_idx_2", "stage2_head"),
-        ):
-            head_names = {t[head_key] for t in transitions if t[head_key] is not None}
-            for head_name in head_names:
-                rows = [i for i, t in enumerate(transitions) if t[head_key] == head_name]
-                if not rows:
+        for stage in (1, 2):
+            head_ids = tb[f"head{stage}_id"]
+            for head_id in torch.unique(head_ids).tolist():
+                if head_id < 0:
                     continue
-                row_idx = torch.tensor(rows, dtype=torch.long, device=device)
+                head_name = HEAD_NAMES[head_id]
+                rows = (head_ids == head_id).nonzero(as_tuple=True)[0]
                 size = HEAD_SIZES[head_name]
-                sub_masks = torch.tensor(
-                    np.array([transitions[i][mask_key][:size] for i in rows]), device=device)
-                sub_idxs = torch.tensor([transitions[i][idx_key] for i in rows], dtype=torch.long, device=device)
-                logits = self._head_modules[head_name](feats[row_idx]).masked_fill(sub_masks == 0, NEG_INF)
-                dist = Categorical(logits=logits)
-                extra_logprob[row_idx] += dist.log_prob(sub_idxs)
-                extra_entropy[row_idx] += dist.entropy()
+                sub_masks = tb[f"sub_mask_{stage}"][rows, :size]
+                sub_idxs = tb[f"sub_idx_{stage}"][rows]
+                logits = self._head_modules[head_name](feats[rows]).masked_fill(sub_masks == 0, NEG_INF)
+                dist = Categorical(logits=logits, validate_args=False)
+                extra_logprob[rows] += dist.log_prob(sub_idxs)
+                extra_entropy[rows] += dist.entropy()
 
         return logprob + extra_logprob, entropy + extra_entropy, value

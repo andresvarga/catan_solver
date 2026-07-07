@@ -325,3 +325,47 @@ def test_full_random_games_never_crash_and_terminate(monkeypatch=None):
         assert steps < 4000, f"seed {seed} did not terminate"
         assert engine.state.winner is not None
         assert total_vp(engine.state, engine.state.winner) >= 10
+
+
+def test_road_cannot_continue_through_opponent_settlement():
+    """Official rule: an opponent's settlement/city blocks road continuation
+    through its vertex. Regression test for the engine allowing builds that
+    compute_longest_road_length would then refuse to count."""
+    state = new_game(seed=20)
+    # interior-ish vertex with >= 3 edges so there's an e2 distinct from e1
+    vid = next(v.id for v in state.board.vertices.values() if len(v.edge_ids) == 3)
+    v = state.board.vertices[vid]
+    e1, e2 = v.edge_ids[0], v.edge_ids[1]
+    # player 0 has a road ending at vid via e1
+    state.players[0].roads.append(e1)
+    state.road_owner[e1] = 0
+    assert can_build_road(state, 0, e2), "sanity: continuation legal with vertex unoccupied"
+
+    # opponent settlement on vid blocks continuing through it
+    state.players[1].settlements.append(vid)
+    state.vertex_owner[vid] = (1, "settlement")
+    assert not can_build_road(state, 0, e2)
+
+    # ... but the player's OWN settlement there allows it
+    state.players[1].settlements.remove(vid)
+    state.vertex_owner[vid] = (0, "settlement")
+    state.players[0].settlements.append(vid)
+    assert can_build_road(state, 0, e2)
+
+
+def test_road_owner_index_stays_in_sync_with_player_road_lists():
+    """`state.road_owner` is the O(1) legality index the engine maintains
+    alongside `players[*].roads`; if the two ever diverge, road/settlement
+    legality silently rots. Play full random games and check the invariant."""
+    from agents.random_agent import choose
+    for seed in range(5):
+        engine = CatanEngine(randomize_board=True, seed=seed)
+        rng = random.Random(seed)
+        steps = 0
+        while not engine.done and steps < 4000:
+            engine.step(choose(engine.state, rng))
+            steps += 1
+        expected = {eid: pid for pid, p in engine.state.players.items() for eid in p.roads}
+        assert engine.state.road_owner == expected
+        total_roads = sum(len(p.roads) for p in engine.state.players.values())
+        assert len(engine.state.road_owner) == total_roads  # no edge owned twice

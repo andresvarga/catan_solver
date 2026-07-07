@@ -48,7 +48,8 @@ FLAT_ADAPTER = ModelAdapter(encode=_flat_encode, to_single=_flat_to_single, to_b
 
 
 def _graph_encode(env, obs, pid):
-    return build_graph_observation(env.engine.state, pid)
+    return build_graph_observation(env.engine.state, pid,
+                                    public_hand_features=env.public_hand_features)
 
 
 def _graph_to_single(encoded, device):

@@ -110,6 +110,18 @@ class GameState:
     longest_road_length: int = 0
     road_lengths: dict[int, int] = field(default_factory=dict)
     vertex_owner: dict[int, tuple[int, str]] = field(default_factory=dict)  # vertex_id -> (player_id, "settlement"|"city")
+    road_owner: dict[int, int] = field(default_factory=dict)  # edge_id -> player_id; kept in sync by engine.step, mirrors players[*].roads
+    # Publicly-inferable per-player resource estimates (card counting): every
+    # resource flow except robber-steal identity and discard contents is
+    # public in Catan, so an attentive player can track everyone's hand to
+    # within the uncertainty those two events introduce. Maintained by
+    # engine.step as expected values -- exact for public flows, proportional
+    # expectation updates for hidden ones. Invariant: non-negative, and
+    # sum(estimates[pid]) <= players[pid].hand_size() (the remainder is
+    # "unknown-identity" mass). Exposed as observation features only when
+    # the env's `public_hand_features` flag is on.
+    public_resource_estimates: dict[int, dict[Resource, float]] = field(
+        default_factory=lambda: {pid: {r: 0.0 for r in Resource} for pid in range(NUM_PLAYERS)})
     largest_army_holder: int | None = None
     setup_round: int = 0  # 0 = first pass, 1 = second (reverse) pass
     setup_order_index: int = 0

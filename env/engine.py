@@ -53,15 +53,25 @@ def vertex_distance_ok(state: GameState, vertex_id: int) -> bool:
 
 
 def road_edge_free(state: GameState, edge_id: int) -> bool:
-    return all(edge_id not in p.roads for p in state.players.values())
+    return edge_id not in state.road_owner
 
 
 def player_touches_edge(state: GameState, player_id: int, vertex_id: int) -> bool:
     player = state.players[player_id]
     if vertex_id in player.settlements or vertex_id in player.cities:
         return True
+    # An opponent's settlement/city on this vertex blocks road continuation
+    # through it (official rule): the player's roads may *end* here, but a
+    # new road can't connect to the network via this vertex -- it would have
+    # to connect through its other endpoint instead. This mirrors the
+    # opponent-vertex cutoff compute_longest_road_length already applies, so
+    # build legality and road scoring finally agree.
+    owner, _ = owner_of_vertex(state, vertex_id)
+    if owner is not None and owner != player_id:
+        return False
+    road_owner = state.road_owner
     for eid in state.board.vertices[vertex_id].edge_ids:
-        if eid in player.roads:
+        if road_owner.get(eid) == player_id:
             return True
     return False
 
@@ -82,8 +92,9 @@ def can_build_settlement(state: GameState, player_id: int, vertex_id: int,
     if not vertex_distance_ok(state, vertex_id):
         return False
     if require_road:
-        edge_ids = state.board.vertices[vertex_id].edge_ids
-        if not any(eid in state.players[player_id].roads for eid in edge_ids):
+        road_owner = state.road_owner
+        if not any(road_owner.get(eid) == player_id
+                   for eid in state.board.vertices[vertex_id].edge_ids):
             return False
     return True
 
@@ -103,6 +114,65 @@ def pay(state: GameState, player_id: int, cost: dict[Resource, int]) -> None:
     for r, amt in cost.items():
         player.resources[r] -= amt
         state.bank[r] += amt
+    _public_spend(state, player_id, cost)  # building costs are public
+
+
+# --------------------------------------------------------------------------
+# Public hand-estimate bookkeeping (card counting -- see GameState field doc)
+# --------------------------------------------------------------------------
+
+def _public_gain(state: GameState, pid: int, resource: Resource, amt: float) -> None:
+    state.public_resource_estimates[pid][resource] += amt
+
+
+def _public_spend(state: GameState, pid: int, cost: dict[Resource, int]) -> None:
+    """Publicly-identified loss (build cost, trade give, ...): subtract what
+    the estimate can cover; any shortfall must have been paid from unknown-
+    identity cards, which the derived unknown mass absorbs automatically."""
+    est = state.public_resource_estimates[pid]
+    for r, amt in cost.items():
+        est[r] = max(0.0, est[r] - amt)
+    _public_clamp(state, pid)
+
+
+def _public_clamp(state: GameState, pid: int) -> None:
+    """Re-impose sum(estimates) <= hand_size. Expectation updates for
+    hidden-identity events can leave the estimate over-claiming after a later
+    exactly-known spend (e.g. we credited a thief 0.5 expected sheep but the
+    stolen card was really wood, which they then visibly spent)."""
+    est = state.public_resource_estimates[pid]
+    total = sum(est.values())
+    hand = state.players[pid].hand_size()
+    if total > hand:
+        scale = 0.0 if total <= 0 else hand / total
+        for r in est:
+            est[r] *= scale
+
+
+def _public_unidentified_loss(state: GameState, pid: int, k: int, hand_before: int) -> None:
+    """k cards of publicly-unknown identity left the hand (discard contents,
+    robber-steal victim): each card in the hand was equally likely, so the
+    whole estimate scales down proportionally."""
+    if hand_before <= 0:
+        return
+    scale = max(0.0, 1.0 - k / hand_before)
+    est = state.public_resource_estimates[pid]
+    for r in est:
+        est[r] *= scale
+
+
+def _public_steal(state: GameState, victim: int, thief: int, victim_hand_before: int) -> None:
+    """One unidentified card moved victim -> thief: the thief's estimate
+    gains the victim's expected per-resource distribution (the residual
+    probability mass -- the victim's own unknown-identity share -- lands in
+    the thief's unknown mass automatically via hand size)."""
+    if victim_hand_before <= 0:
+        return
+    victim_est = state.public_resource_estimates[victim]
+    thief_est = state.public_resource_estimates[thief]
+    for r, amt in victim_est.items():
+        thief_est[r] += amt / victim_hand_before
+    _public_unidentified_loss(state, victim, 1, victim_hand_before)
 
 
 def trade_ratio_for(state: GameState, player_id: int, resource: Resource) -> int:
@@ -266,6 +336,7 @@ def distribute_resources(state: GameState, total: int) -> dict[int, dict[Resourc
             if amt:
                 state.players[pid].resources[resource] += amt
                 state.bank[resource] -= amt
+                _public_gain(state, pid, resource, amt)  # dice production is public
     return gains
 
 
@@ -475,6 +546,10 @@ def _apply_move_robber(state: GameState, mover: int, hex_id: int, victim: int | 
         vhand = state.players[victim].resources
         pool = [r for r, cnt in vhand.items() for _ in range(cnt)]
         if pool:
+            # Public bookkeeping first (it must see the pre-steal hand size);
+            # the stolen card's identity is hidden from everyone but the two
+            # parties, so only the expected distribution moves.
+            _public_steal(state, victim, mover, len(pool))
             stolen = rng.choice(pool)
             vhand[stolen] -= 1
             state.players[mover].resources[stolen] += 1
@@ -485,9 +560,13 @@ def _execute_trade(state: GameState, giver: int, receiver: int,
     for r, amt in give.items():
         state.players[giver].resources[r] -= amt
         state.players[receiver].resources[r] += amt
+        _public_gain(state, receiver, r, amt)  # executed trades are public
     for r, amt in want.items():
         state.players[receiver].resources[r] -= amt
         state.players[giver].resources[r] += amt
+        _public_gain(state, giver, r, amt)
+    _public_spend(state, giver, give)
+    _public_spend(state, receiver, want)
 
 
 def step(state: GameState, action: Action, rng: random.Random | None = None) -> None:
@@ -508,6 +587,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
     if state.phase == Phase.SETUP_ROAD:
         eid = p["edge_id"]
         state.players[actor].roads.append(eid)
+        state.road_owner[eid] = actor
         idx = state.setup_order_index
         if idx >= NUM_PLAYERS:  # second pass: grant starting resources
             v = state.just_placed_settlement_vertex
@@ -515,7 +595,9 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
                 hx = state.board.hexes[hx_id]
                 if hx.number is not None:
                     from env.board import HEX_TO_RESOURCE
-                    state.players[actor].resources[HEX_TO_RESOURCE[hx.terrain]] += 1
+                    resource = HEX_TO_RESOURCE[hx.terrain]
+                    state.players[actor].resources[resource] += 1
+                    _public_gain(state, actor, resource, 1)  # setup grants are public
         recompute_longest_road(state)
         state.setup_order_index += 1
         if state.setup_order_index >= len(SETUP_ORDER):
@@ -541,9 +623,12 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
 
     if t == ActionType.DISCARD:
         cards = p["cards"]
+        hand_before = state.players[actor].hand_size()
         for r, amt in cards.items():
             state.players[actor].resources[r] -= amt
             state.bank[r] += amt
+        # Discard *count* is public, contents are not.
+        _public_unidentified_loss(state, actor, sum(cards.values()), hand_before)
         state.players_to_discard.pop(0)
         if not state.players_to_discard:
             state.phase = Phase.MOVE_ROBBER
@@ -562,6 +647,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
         else:
             pay(state, actor, BUILDING_COSTS["road"])
         state.players[actor].roads.append(eid)
+        state.road_owner[eid] = actor
         # A standalone road build (no settlement placed in this same step) can
         # only ever extend the *acting* player's own network -- it can't sever
         # anyone else's, since severing requires a new blocking vertex, which
@@ -619,6 +705,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
         for r in p["resources"]:
             player.resources[r] += 1
             state.bank[r] -= 1
+            _public_gain(state, actor, r, 1)  # announced publicly
         return
 
     if t == ActionType.PLAY_MONOPOLY:
@@ -632,6 +719,14 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
             taken = other.resources[r]
             other.resources[r] = 0
             player.resources[r] += taken
+            # Monopoly is fully public: each victim visibly hands over their
+            # entire holding of r, so their r-estimate collapses to exactly 0
+            # (this also retroactively reveals how many of their unknown
+            # cards were r -- the derived unknown mass absorbs it) and the
+            # monopolist is credited the exact amount.
+            state.public_resource_estimates[other_id][r] = 0.0
+            _public_clamp(state, other_id)
+            _public_gain(state, actor, r, taken)
         return
 
     if t == ActionType.MARITIME_TRADE:
@@ -641,6 +736,12 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
         state.bank[give_r] += ratio
         state.players[actor].resources[want_r] += 1
         state.bank[want_r] -= 1
+        # Bank trades are public. Gain before spend: _public_spend ends with
+        # the sum<=hand clamp, which must run after ALL of this event's
+        # updates -- a gain applied post-clamp could push the estimate back
+        # above the (already final) hand size.
+        _public_gain(state, actor, want_r, 1)
+        _public_spend(state, actor, {give_r: ratio})
         return
 
     if t == ActionType.PROPOSE_TRADE:

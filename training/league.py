@@ -64,7 +64,13 @@ class League:
         os.makedirs(storage_dir, exist_ok=True)
         self.members: dict[str, LeagueMember] = {}
         self.main_name: str | None = None
-        self._env = trueskill.TrueSkill()
+        # Last completed training iteration -- persisted so a resumed run
+        # continues numbering (and snapshot filenames) where it left off.
+        self.last_iteration: int = 0
+        # draw_probability=0: episode_rating_teams always reports a strict
+        # winner/loser ordering, so TrueSkill's default 10% draw prior would
+        # just miscalibrate every update.
+        self._env = trueskill.TrueSkill(draw_probability=0.0)
 
     # -- membership -----------------------------------------------------------
     def add_member(self, name: str, role: str, checkpoint_path: str | None = None,
@@ -147,7 +153,8 @@ class League:
     # -- persistence -----------------------------------------------------------------
     def save(self) -> None:
         path = os.path.join(self.storage_dir, "league.json")
-        data = {"main_name": self.main_name, "members": {k: asdict(v) for k, v in self.members.items()}}
+        data = {"main_name": self.main_name, "last_iteration": self.last_iteration,
+                "members": {k: asdict(v) for k, v in self.members.items()}}
         tmp_path = path + ".tmp"
         with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -161,5 +168,6 @@ class League:
             with open(path) as f:
                 data = json.load(f)
             league.main_name = data["main_name"]
+            league.last_iteration = data.get("last_iteration", 0)  # absent in pre-existing files
             league.members = {k: LeagueMember(**v) for k, v in data["members"].items()}
         return league

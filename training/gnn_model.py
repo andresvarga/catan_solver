@@ -31,6 +31,7 @@ not a redesign.
 """
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical
@@ -41,19 +42,15 @@ from training.board_topology import (
     VERTEX_TO_EDGE, VERTEX_TO_HEX, VERTEX_TO_VERTEX,
 )
 from training.graph_features import (
-    CONTEXT_FEAT_DIM, EDGE_FEAT_DIM, HEX_FEAT_DIM, NUM_OPPONENTS, OPPONENT_FEAT_DIM,
-    PLAYER_FEAT_DIM, VERTEX_FEAT_DIM,
+    CONTEXT_FEAT_DIM, EDGE_FEAT_DIM, HEX_FEAT_DIM, NUM_OPPONENTS,
+    PLAYER_FEAT_DIM, VERTEX_FEAT_DIM, opponent_feat_dim,
 )
 from env.state import NUM_PLAYERS
 from training.hier_model import (
-    ACTION_TYPES, NEG_INF, NUM_ACTION_TYPES, TYPE_TO_HEADS, group_by_type, match_action,
-    stage1_mask, stage2_mask,
+    ACTION_TYPES, ACTION_TYPE_INDEX, HEAD_NAMES, HEAD_SIZES, NEG_INF, NUM_ACTION_TYPES,
+    SUBMASK_PAD, TYPE_TO_HEADS, _pad, group_by_type, masked_sample, match_action,
+    prepare_transition_batch, stage1_mask, stage2_mask,
 )
-
-
-def _masked_categorical(logits: torch.Tensor, mask: torch.Tensor) -> Categorical:
-    logits = logits.masked_fill(mask == 0, NEG_INF)
-    return Categorical(logits=logits)
 
 
 class RelationalGNNLayer(nn.Module):
@@ -130,9 +127,11 @@ class GraphTopology(nn.Module):
 
 
 class GraphActorCritic(nn.Module):
-    def __init__(self, hidden: int = 128, gnn_layers: int = 3):
+    def __init__(self, hidden: int = 128, gnn_layers: int = 3,
+                 public_hand_features: bool = False):
         super().__init__()
         self.hidden = hidden
+        self.public_hand_features = public_hand_features
         self.topo = GraphTopology()
 
         self.hex_embed = nn.Linear(HEX_FEAT_DIM, hidden)
@@ -141,7 +140,8 @@ class GraphActorCritic(nn.Module):
         self.gnn_layers = nn.ModuleList([RelationalGNNLayer(hidden) for _ in range(gnn_layers)])
 
         self.player_mlp = nn.Sequential(nn.Linear(PLAYER_FEAT_DIM, hidden), nn.Tanh())
-        self.opponent_mlp = nn.Sequential(nn.Linear(OPPONENT_FEAT_DIM, hidden), nn.Tanh())
+        self.opponent_mlp = nn.Sequential(
+            nn.Linear(opponent_feat_dim(public_hand_features), hidden), nn.Tanh())
         self.context_mlp = nn.Sequential(nn.Linear(CONTEXT_FEAT_DIM, hidden), nn.Tanh())
         self.fusion = nn.Sequential(
             nn.Linear(hidden * 6, hidden), nn.Tanh(),
@@ -229,8 +229,10 @@ class GraphActorCritic(nn.Module):
         raise ValueError(f"unhandled head {head_name}")
 
     def value(self, obs_batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Value-only forward pass, used to bootstrap GAE at a truncated
-        (not truly terminal) episode boundary without sampling an action."""
+        """Value-only forward pass (no action sampling). Not used by the
+        training loop anymore -- truncation is treated as terminal in
+        compute_gae, so nothing bootstraps from it -- but kept as a cheap
+        utility for analysis and future centralized-critic work."""
         features, _, _, _, _ = self.encode(obs_batch)
         return self.value_head(features).squeeze(-1)
 
@@ -241,91 +243,84 @@ class GraphActorCritic(nn.Module):
         self_id = obs_batch["self_id"]
         by_type = group_by_type(legal_actions)
 
-        type_mask = torch.zeros(NUM_ACTION_TYPES, device=device)
+        type_mask = np.zeros(NUM_ACTION_TYPES, dtype=np.float32)
         for t in by_type:
-            type_mask[ACTION_TYPES.index(t)] = 1.0
+            type_mask[ACTION_TYPE_INDEX[t]] = 1.0
         type_logits = self.type_head(features).squeeze(0)
-        type_dist = _masked_categorical(type_logits, type_mask)
-        type_idx = int(torch.argmax(type_dist.logits).item()) if deterministic else int(type_dist.sample().item())
-        logprob = type_dist.log_prob(torch.tensor(type_idx, device=device))
+        type_idx, logprob = masked_sample(type_logits, torch.as_tensor(type_mask, device=device),
+                                           deterministic)
 
         chosen_type = ACTION_TYPES[type_idx]
         actions_of_type = by_type[chosen_type]
         stage1_head, stage2_head = TYPE_TO_HEADS[chosen_type]
 
         idx1, idx2 = -1, -1
-        mask1_padded = torch.zeros(100, device=device)
-        mask2_padded = torch.zeros(100, device=device)
+        mask1_padded = np.zeros(SUBMASK_PAD, dtype=np.float32)
+        mask2_padded = np.zeros(SUBMASK_PAD, dtype=np.float32)
 
         if stage1_head is not None:
             mask1 = stage1_mask(chosen_type, actions_of_type)
             logits1 = self._head_logits(stage1_head, features, hex_emb, vertex_emb, edge_emb,
                                          opp_emb, self_id).squeeze(0)
-            dist1 = _masked_categorical(logits1, torch.tensor(mask1, device=device))
-            idx1 = int(torch.argmax(dist1.logits).item()) if deterministic else int(dist1.sample().item())
-            logprob = logprob + dist1.log_prob(torch.tensor(idx1, device=device))
-            mask1_padded[: len(mask1)] = torch.tensor(mask1, device=device)
+            idx1, lp1 = masked_sample(logits1, torch.as_tensor(mask1, device=device), deterministic)
+            logprob += lp1
+            mask1_padded = _pad(mask1)
 
             if stage2_head is not None:
                 mask2 = stage2_mask(chosen_type, actions_of_type, idx1)
                 logits2 = self._head_logits(stage2_head, features, hex_emb, vertex_emb, edge_emb,
                                              opp_emb, self_id).squeeze(0)
-                dist2 = _masked_categorical(logits2, torch.tensor(mask2, device=device))
-                idx2 = int(torch.argmax(dist2.logits).item()) if deterministic else int(dist2.sample().item())
-                logprob = logprob + dist2.log_prob(torch.tensor(idx2, device=device))
-                mask2_padded[: len(mask2)] = torch.tensor(mask2, device=device)
+                idx2, lp2 = masked_sample(logits2, torch.as_tensor(mask2, device=device), deterministic)
+                logprob += lp2
+                mask2_padded = _pad(mask2)
 
         result_action = match_action(chosen_type, actions_of_type,
                                       idx1 if idx1 != -1 else None, idx2 if idx2 != -1 else None)
         value = self.value_head(features).squeeze(0).squeeze(-1)
 
         head_data = {
-            "type_mask": type_mask.cpu().numpy(), "type_idx": type_idx,
+            "type_mask": type_mask, "type_idx": type_idx,
             "stage1_head": stage1_head, "stage2_head": stage2_head,
-            "sub_mask_1": mask1_padded.cpu().numpy(), "sub_idx_1": idx1,
-            "sub_mask_2": mask2_padded.cpu().numpy(), "sub_idx_2": idx2,
+            "sub_mask_1": mask1_padded, "sub_idx_1": idx1,
+            "sub_mask_2": mask2_padded, "sub_idx_2": idx2,
         }
-        return result_action, float(logprob.item()), float(value.item()), head_data
+        return result_action, logprob, float(value.item()), head_data
 
-    def evaluate_actions(self, obs_batch: dict[str, torch.Tensor], transitions: list[dict]):
-        import numpy as np
-        from training.hier_model import HEAD_SIZES
-
+    def evaluate_actions(self, obs_batch: dict[str, torch.Tensor], transitions):
+        """See HierarchicalActorCritic.evaluate_actions -- `transitions` is
+        either a prepared tensor batch (`prepare_transition_batch`) or a raw
+        list of transition dicts (converted here for tests/ad-hoc callers)."""
         features, hex_emb, vertex_emb, edge_emb, opp_emb = self.encode(obs_batch)
         self_id = obs_batch["self_id"]
         n = features.shape[0]
         device = features.device
+        tb = transitions if isinstance(transitions, dict) else prepare_transition_batch(transitions, device)
 
-        type_masks = torch.tensor(np.array([t["type_mask"] for t in transitions]), device=device)
-        type_idxs = torch.tensor([t["type_idx"] for t in transitions], dtype=torch.long, device=device)
-        type_logits = self.type_head(features).masked_fill(type_masks == 0, NEG_INF)
-        type_dist = Categorical(logits=type_logits)
-        logprob = type_dist.log_prob(type_idxs)
+        type_logits = self.type_head(features).masked_fill(tb["type_mask"] == 0, NEG_INF)
+        type_dist = Categorical(logits=type_logits, validate_args=False)
+        logprob = type_dist.log_prob(tb["type_idx"])
         entropy = type_dist.entropy()
         value = self.value_head(features).squeeze(-1)
 
         extra_logprob = torch.zeros(n, device=device)
         extra_entropy = torch.zeros(n, device=device)
 
-        for stage, mask_key, idx_key, head_key in (
-            (1, "sub_mask_1", "sub_idx_1", "stage1_head"),
-            (2, "sub_mask_2", "sub_idx_2", "stage2_head"),
-        ):
-            head_names = {t[head_key] for t in transitions if t[head_key] is not None}
-            for head_name in head_names:
-                rows = [i for i, t in enumerate(transitions) if t[head_key] == head_name]
-                if not rows:
+        for stage in (1, 2):
+            head_ids = tb[f"head{stage}_id"]
+            for head_id in torch.unique(head_ids).tolist():
+                if head_id < 0:
                     continue
-                row_idx = torch.tensor(rows, dtype=torch.long, device=device)
+                head_name = HEAD_NAMES[head_id]
+                rows = (head_ids == head_id).nonzero(as_tuple=True)[0]
                 size = HEAD_SIZES[head_name]
-                sub_masks = torch.tensor(np.array([transitions[i][mask_key][:size] for i in rows]), device=device)
-                sub_idxs = torch.tensor([transitions[i][idx_key] for i in rows], dtype=torch.long, device=device)
-                logits = self._head_logits(head_name, features[row_idx], hex_emb[row_idx],
-                                            vertex_emb[row_idx], edge_emb[row_idx],
-                                            opp_emb[row_idx], self_id[row_idx])
+                sub_masks = tb[f"sub_mask_{stage}"][rows, :size]
+                sub_idxs = tb[f"sub_idx_{stage}"][rows]
+                logits = self._head_logits(head_name, features[rows], hex_emb[rows],
+                                            vertex_emb[rows], edge_emb[rows],
+                                            opp_emb[rows], self_id[rows])
                 logits = logits.masked_fill(sub_masks == 0, NEG_INF)
-                dist = Categorical(logits=logits)
-                extra_logprob[row_idx] += dist.log_prob(sub_idxs)
-                extra_entropy[row_idx] += dist.entropy()
+                dist = Categorical(logits=logits, validate_args=False)
+                extra_logprob[rows] += dist.log_prob(sub_idxs)
+                extra_entropy[rows] += dist.entropy()
 
         return logprob + extra_logprob, entropy + extra_entropy, value

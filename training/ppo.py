@@ -40,18 +40,9 @@ def collect_episode(env: CatanAECEnv, model: ActorCritic, device: str, seed: int
 
         if agent in pending:
             p = pending.pop(agent)
-            bootstrap_value = 0.0
-            if trunc and not term:
-                # Truncated (hit max_episode_steps), not a true win/loss: bootstrap
-                # with the model's own value estimate of the final observation
-                # instead of treating it as if there were no future reward.
-                flat_final = flatten_observation(obs)
-                obs_final_t = torch.tensor(flat_final, dtype=torch.float32, device=device).unsqueeze(0)
-                with torch.no_grad():
-                    bootstrap_value = float(model.value(obs_final_t).item())
             episode_data[agent].append({
                 **p, "reward": reward, "terminated": term, "truncated": trunc,
-                "done": done, "bootstrap_value": bootstrap_value,
+                "done": done,
             })
 
         if done:
@@ -61,7 +52,7 @@ def collect_episode(env: CatanAECEnv, model: ActorCritic, device: str, seed: int
             mask = obs["action_mask"]
             obs_t = torch.tensor(flat, dtype=torch.float32, device=device).unsqueeze(0)
             mask_t = torch.tensor(mask, dtype=torch.float32, device=device).unsqueeze(0)
-            with torch.no_grad():
+            with torch.inference_mode():
                 action_t, logprob_t, _, value_t = model.act(obs_t, mask_t)
             action = int(action_t.item())
             pending[agent] = {
@@ -74,18 +65,21 @@ def collect_episode(env: CatanAECEnv, model: ActorCritic, device: str, seed: int
 
 
 def compute_gae(transitions: list[dict], gamma: float = GAMMA, lam: float = GAE_LAMBDA) -> list[dict]:
+    """Truncation is treated exactly like termination here (mask on `done`,
+    no bootstrap value): the env already pays out rank-based terminal rewards
+    on truncation ("rank on current standing"), and that rank reward *is* the
+    estimate of the episode's remaining value. The previous scheme paid the
+    rank reward AND bootstrapped V(s_final) on top -- two estimates of the
+    same future outcome summed into one target, systematically inflating
+    value targets exactly in the regime (early training, low finish rate)
+    where truncation dominates."""
     if not transitions:
         return transitions
-    # Bootstrap the last transition with the model's own value estimate if the
-    # episode ended by truncation rather than a true terminal state (see
-    # collect_episode's "bootstrap_value"); defaults to 0.0 for a real terminal.
-    final_bootstrap = transitions[-1].get("bootstrap_value", 0.0)
-    values = [t["value"] for t in transitions] + [final_bootstrap]
+    values = [t["value"] for t in transitions] + [0.0]  # final entry is always masked out
     advantages = [0.0] * len(transitions)
     gae = 0.0
     for t in reversed(range(len(transitions))):
-        terminated = transitions[t].get("terminated", transitions[t]["done"])
-        mask = 0.0 if terminated else 1.0
+        mask = 0.0 if transitions[t]["done"] else 1.0
         delta = transitions[t]["reward"] + gamma * values[t + 1] * mask - values[t]
         gae = delta + gamma * lam * mask * gae
         advantages[t] = gae
@@ -151,7 +145,7 @@ def ppo_update(model: ActorCritic, optimizer: torch.optim.Optimizer, transitions
             nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 approx_kl = (old_logprobs[mb] - logprob).mean().item()
                 clip_frac = ((ratio - 1.0).abs() > clip_ratio).float().mean().item()
             stats["policy_loss"].append(policy_loss.item())

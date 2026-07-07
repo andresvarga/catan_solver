@@ -21,8 +21,11 @@ _LOW_WEIGHT_TYPES = {ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE}
 _LOW_WEIGHT = 0.05
 
 
-def choose(state: GameState, rng: random.Random) -> Action:
-    actions = legal_actions(state)
+def choose(state: GameState, rng: random.Random, legal: list[Action] | None = None) -> Action:
+    """`legal` lets a caller that already enumerated this step's legal
+    actions (e.g. the rollout loop, via the env's cache) pass them in instead
+    of paying for a second enumeration."""
+    actions = legal if legal is not None else legal_actions(state)
     if not actions:
         raise RuntimeError(f"No legal actions in phase {state.phase}")
     weights = [_LOW_WEIGHT if a.type in _LOW_WEIGHT_TYPES else 1.0 for a in actions]
@@ -37,5 +40,5 @@ class RandomAgent:
         self.player_id = player_id
         self.rng = rng or random.Random()
 
-    def choose(self, state: GameState) -> Action:
-        return choose(state, self.rng)
+    def choose(self, state: GameState, legal: list[Action] | None = None) -> Action:
+        return choose(state, self.rng, legal)

@@ -23,10 +23,12 @@ decision for a single CPU machine, not an oversight.
 from __future__ import annotations
 
 import argparse
+import math
 import multiprocessing as mp
 import os
 import random
 import time
+from collections import OrderedDict, deque
 
 import numpy as np
 import torch
@@ -38,32 +40,46 @@ from env.pettingzoo_env import CatanAECEnv
 from env.state import NUM_PLAYERS
 from training.agent import HierarchicalLearnedAgent, load_gnn_model, load_hier_model
 from training.hier_model import HierarchicalActorCritic
-from training.hier_ppo import GAE_LAMBDA, GAMMA, collect_rollout, collect_rollout_parallel, ppo_update
+from training.hier_ppo import (
+    GAE_LAMBDA, GAMMA, collect_rollout, collect_rollout_parallel, compute_holdout_nll,
+    load_bc_anchor, ppo_update, reseed_forked_worker,
+)
 from training.league import League
 from training.model import observation_dim
 from training.model_adapters import ADAPTERS
 from training.train_hier import build_model, evaluate_policy, move_optimizer_state
 
 MAX_EVAL_STEPS = 4000
+_MODEL_CACHE_MAX = 16
 
 
-_LOADED_MODEL_CACHE: dict[tuple[str, str, int, int], object] = {}
+_LOADED_MODEL_CACHE: "OrderedDict[tuple[str, str, int, int], object]" = OrderedDict()
 
 
-def load_model_for(model_type: str, checkpoint_path: str, hidden: int, gnn_layers: int):
+def load_model_for(model_type: str, checkpoint_path: str, hidden: int, gnn_layers: int,
+                   public_hand_features: bool = False):
     """Cached by (model_type, checkpoint_path, hidden, gnn_layers): every
     checkpoint file is written once under a unique name (historical/main/
     main_exploiter snapshots each get their own filename per iteration) and
     never mutated afterward, so it's safe -- and much cheaper -- to load a
-    given checkpoint from disk only once per process instead of every time an
-    opponent is sampled or evaluated against."""
-    key = (model_type, checkpoint_path, hidden, gnn_layers)
-    if key not in _LOADED_MODEL_CACHE:
-        if model_type == "gnn":
-            _LOADED_MODEL_CACHE[key] = load_gnn_model(checkpoint_path, hidden=hidden, gnn_layers=gnn_layers)
-        else:
-            _LOADED_MODEL_CACHE[key] = load_hier_model(checkpoint_path, hidden=hidden)
-    return _LOADED_MODEL_CACHE[key]
+    given checkpoint from disk only once instead of every time an opponent is
+    sampled or evaluated against. LRU-bounded: a long run accumulates
+    hundreds of league members, and an unbounded cache would keep every one
+    of their models resident forever."""
+    key = (model_type, checkpoint_path, hidden, gnn_layers, public_hand_features)
+    if key in _LOADED_MODEL_CACHE:
+        _LOADED_MODEL_CACHE.move_to_end(key)
+        return _LOADED_MODEL_CACHE[key]
+    if model_type == "gnn":
+        model = load_gnn_model(checkpoint_path, hidden=hidden, gnn_layers=gnn_layers,
+                                public_hand_features=public_hand_features)
+    else:
+        model = load_hier_model(checkpoint_path, hidden=hidden,
+                                 public_hand_features=public_hand_features)
+    _LOADED_MODEL_CACHE[key] = model
+    if len(_LOADED_MODEL_CACHE) > _MODEL_CACHE_MAX:
+        _LOADED_MODEL_CACHE.popitem(last=False)
+    return model
 
 
 def env_kwargs_from_args(args: argparse.Namespace) -> dict:
@@ -73,7 +89,22 @@ def env_kwargs_from_args(args: argparse.Namespace) -> dict:
         allow_dev_cards=not args.no_dev_cards,
         vp_shaping_weight=args.vp_shaping_weight,
         max_episode_steps=args.max_episode_steps,
+        public_hand_features=args.public_hand_features,
     )
+
+
+def annealed_bc_coef(initial: float, final: float | None, iteration: int,
+                      start_iteration: int, total_iterations: int) -> float:
+    """Linear anchor-coefficient schedule over *this invocation's* iterations
+    (resume-aware: progress is measured from start_iteration, not absolute
+    league iteration). final=None means no annealing."""
+    if final is None:
+        return initial
+    if total_iterations <= 1:
+        return final
+    progress = (iteration - start_iteration) / (total_iterations - 1)
+    progress = min(1.0, max(0.0, progress))
+    return initial + (final - initial) * progress
 
 
 def episode_rating_teams(summary: dict, main_name: str, opponent_name: str) -> list[str]:
@@ -114,8 +145,10 @@ def make_seat_agents(member, seats: list[int], args: argparse.Namespace, rng: ra
     if member.role == "heuristic":
         return {pid: HeuristicAgent(pid, random.Random(rng.randint(0, 2**31 - 1))) for pid in seats}
     model = shared_model if shared_model is not None else load_model_for(
-        args.model_type, member.checkpoint_path, args.hidden, args.gnn_layers)
-    return {pid: HierarchicalLearnedAgent(pid, model=model, deterministic=False, model_kind=args.model_type)
+        args.model_type, member.checkpoint_path, args.hidden, args.gnn_layers,
+        public_hand_features=args.public_hand_features)
+    return {pid: HierarchicalLearnedAgent(pid, model=model, deterministic=False, model_kind=args.model_type,
+                                           public_hand_features=args.public_hand_features)
             for pid in seats}
 
 
@@ -131,22 +164,29 @@ def _play_vs_member_game(model, member, shared_model, args: argparse.Namespace,
     sampling happened earlier in the process -- reproducible for a single
     serial run, but not equal to a parallel run's per-worker RNG stream (each
     worker forks from the same initial state, then diverges independently).
-    This makes each game a pure function of its own seed either way."""
-    torch.manual_seed(seed)
-    engine = CatanEngine(randomize_board=env_kwargs["randomize_board"], seed=seed,
-                          allow_trading=env_kwargs["allow_trading"], allow_dev_cards=env_kwargs["allow_dev_cards"])
-    trainee_seat = seed % NUM_PLAYERS
-    opponent_seats = [p for p in range(NUM_PLAYERS) if p != trainee_seat]
-    agents = make_seat_agents(member, opponent_seats, args, random.Random(seed), shared_model=shared_model)
-    agents[trainee_seat] = HierarchicalLearnedAgent(trainee_seat, model=model, deterministic=True,
-                                                     model_kind=args.model_type)
-    steps = 0
-    while not engine.done and steps < MAX_EVAL_STEPS:
-        actor = engine.acting_player()
-        engine.step(agents[actor].choose(engine.state))
-        steps += 1
-    finished = engine.done
-    won = finished and engine.state.winner == trainee_seat
+    This makes each game a pure function of its own seed either way.
+
+    The reseed happens inside `torch.random.fork_rng()` so it can't clobber
+    the caller's global torch RNG -- in serial mode this runs in the training
+    process, and without the fork every eval pass would silently reset the
+    training loop's own sampling stream."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        engine = CatanEngine(randomize_board=env_kwargs["randomize_board"], seed=seed,
+                              allow_trading=env_kwargs["allow_trading"], allow_dev_cards=env_kwargs["allow_dev_cards"])
+        trainee_seat = seed % NUM_PLAYERS
+        opponent_seats = [p for p in range(NUM_PLAYERS) if p != trainee_seat]
+        agents = make_seat_agents(member, opponent_seats, args, random.Random(seed), shared_model=shared_model)
+        agents[trainee_seat] = HierarchicalLearnedAgent(trainee_seat, model=model, deterministic=True,
+                                                         model_kind=args.model_type,
+                                                         public_hand_features=args.public_hand_features)
+        steps = 0
+        while not engine.done and steps < MAX_EVAL_STEPS:
+            actor = engine.acting_player()
+            engine.step(agents[actor].choose(engine.state))
+            steps += 1
+        finished = engine.done
+        won = finished and engine.state.winner == trainee_seat
     return won, finished
 
 
@@ -167,6 +207,7 @@ def _init_eval2_worker(model, member, shared_model, args: argparse.Namespace, en
     global _eval2_worker_model, _eval2_worker_member, _eval2_worker_shared_model
     global _eval2_worker_args, _eval2_worker_env_kwargs
     torch.set_num_threads(1)
+    reseed_forked_worker()
     model.eval()
     if shared_model is not None:
         shared_model.eval()
@@ -200,7 +241,8 @@ def evaluate_vs_member(model, league: League, member_name: str, games: int,
     # and deserialization, blocking the training loop synchronously.
     shared_model = None
     if member.role not in ("random", "heuristic"):
-        shared_model = load_model_for(args.model_type, member.checkpoint_path, args.hidden, args.gnn_layers)
+        shared_model = load_model_for(args.model_type, member.checkpoint_path, args.hidden, args.gnn_layers,
+                                       public_hand_features=args.public_hand_features)
 
     seeds = [seed_base + i for i in range(games)]
 
@@ -234,11 +276,13 @@ def run_exploiter_session(league: League, args: argparse.Namespace, iteration: i
         return
 
     adapter = ADAPTERS[args.model_type]
-    exploiter_model = build_model(args.model_type, args.hidden, args.gnn_layers)
+    exploiter_model = build_model(args.model_type, args.hidden, args.gnn_layers,
+                                   public_hand_features=args.public_hand_features)
     ckpt = torch.load(main_member.checkpoint_path, map_location="cpu")
     exploiter_model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt)
     optimizer = torch.optim.Adam(exploiter_model.parameters(), lr=args.lr)
-    frozen_main = load_model_for(args.model_type, main_member.checkpoint_path, args.hidden, args.gnn_layers)
+    frozen_main = load_model_for(args.model_type, main_member.checkpoint_path, args.hidden, args.gnn_layers,
+                                  public_hand_features=args.public_hand_features)
 
     rng = random.Random(iteration * 7919)
     base_seed = 500_000 + iteration * 1000
@@ -246,7 +290,8 @@ def run_exploiter_session(league: League, args: argparse.Namespace, iteration: i
         trainee_seat = rng.randrange(NUM_PLAYERS)
         opponent_seats = [p for p in range(NUM_PLAYERS) if p != trainee_seat]
         opponent_agents = {pid: HierarchicalLearnedAgent(pid, model=frozen_main, deterministic=False,
-                                                          model_kind=args.model_type)
+                                                          model_kind=args.model_type,
+                                                          public_hand_features=args.public_hand_features)
                             for pid in opponent_seats}
         if args.num_workers > 1:
             transitions, _ = collect_rollout_parallel(env_kwargs, exploiter_model, args.episodes_per_iter,
@@ -286,6 +331,11 @@ def main():
     parser.add_argument("--no-trading", action="store_true")
     parser.add_argument("--no-dev-cards", action="store_true")
     parser.add_argument("--randomize-board", action="store_true", default=True)
+    parser.add_argument("--public-hand-features", action="store_true",
+                         help="expose the engine's publicly-inferable per-player resource "
+                              "estimates (card counting) as observation features. Widens the "
+                              "observation, so every checkpoint in a league directory must be "
+                              "trained with the same setting of this flag.")
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--self-play-prob", type=float, default=0.5,
                          help="fraction of iterations that are pure self-play vs. a sampled league opponent")
@@ -296,6 +346,70 @@ def main():
     parser.add_argument("--promotion-games", type=int, default=100)
     parser.add_argument("--promotion-win-rate", type=float, default=0.55)
     parser.add_argument("--promotion-alpha", type=float, default=0.05)
+    parser.add_argument("--bc-anchor-dataset", type=str, default=None,
+                         help="demonstration .npz (scripts/collect_heuristic_demos.py) used as a "
+                              "BC anchor: each PPO gradient step adds bc-anchor-coef * NLL of the "
+                              "demonstrated actions, so the policy can only drift from the "
+                              "demonstrations where reward justifies it. hier model only.")
+    parser.add_argument("--bc-anchor-coef", type=float, default=0.2)
+    parser.add_argument("--bc-anchor-coef-final", type=float, default=None,
+                         help="if set, linearly anneal the anchor coefficient from "
+                              "--bc-anchor-coef down to this value over the run's iterations. "
+                              "Rationale: a constant anchor confines the policy to the BC basin "
+                              "(polish-then-plateau); annealing lets late-stage RL leave the "
+                              "basin gradually from a polished starting point instead of being "
+                              "either imprisoned (constant) or shredded (no anchor).")
+    parser.add_argument("--bc-anchor-samples", type=int, default=200_000,
+                         help="subsample the anchor dataset to this many decisions (device memory)")
+    parser.add_argument("--bc-anchor-minibatch", type=int, default=512)
+    parser.add_argument("--bc-holdout-dataset", type=str, default=None,
+                         help="a SEPARATE demonstration .npz (disjoint game seeds from the "
+                              "anchor/BC-pretraining dataset) never trained on. Its NLL under "
+                              "the current policy is measured every iteration as a drift/"
+                              "erosion signal, and the checkpoint with the lowest value seen is "
+                              "kept as <checkpoint-dir>/best_bc_holdout.pt -- early-stopped "
+                              "selection instead of trusting a fixed final iteration count, "
+                              "since a constant/low BC-anchor coefficient was observed to erode "
+                              "the policy slowly over thousands of iterations after an earlier "
+                              "peak (see README/experiment notes).")
+    parser.add_argument("--bc-holdout-samples", type=int, default=None,
+                         help="subsample the holdout dataset to this many decisions (device "
+                              "memory); default None uses the whole file.")
+    parser.add_argument("--select-best-opponent", type=str, default="heuristic",
+                         choices=["random", "heuristic"],
+                         help="checkpoint selection and early stopping are driven by this "
+                              "opponent's win rate from the periodic eval block -- i.e. the "
+                              "actual task metric, not a proxy. (A per-iteration behavior-NLL "
+                              "proxy was tried and found unreliable: divergence from a "
+                              "demonstrator's behavior isn't the same as getting worse, since "
+                              "exceeding the demonstrator requires diverging from it.)")
+    parser.add_argument("--best-eval-window", type=int, default=3,
+                         help="checkpoint selection compares a moving average of the last N "
+                              "eval points (not the single latest one) against the best moving "
+                              "average seen so far, to avoid locking onto a lucky small-sample "
+                              "eval -- eval_games default 30 has ~6-point win-rate noise.")
+    parser.add_argument("--early-stop-patience", type=int, default=0,
+                         help="stop training if the smoothed vs-select-best-opponent win rate "
+                              "hasn't improved for this many consecutive eval checkpoints. "
+                              "0 disables early stopping.")
+    parser.add_argument("--early-stop-min-delta", type=float, default=0.0,
+                         help="minimum increase in the smoothed win rate to count as an "
+                              "improvement (resets the early-stopping patience counter); "
+                              "guards against noise-sized upticks resetting patience forever.")
+    parser.add_argument("--final-eval-games", type=int, default=200,
+                         help="at the end of training, re-evaluate best_eval.pt and the final "
+                              "model with this many games each (0 disables). Necessary even "
+                              "with a full selection window: taking the max of a noisy "
+                              "statistic across dozens of eval checkpoints over a long run "
+                              "systematically overestimates the true value at whichever point "
+                              "wins (regression-to-the-mean, aka winner's curse) -- observed "
+                              "directly, where a smoothed training-time win rate reading from a "
+                              "genuine full 3-eval window (not a partial-window artifact) came "
+                              "in more than 2x higher than a larger re-evaluation of the same "
+                              "checkpoint showed. A big final confirmatory eval on the "
+                              "shortlisted candidate(s) is the standard fix, not a bigger "
+                              "training-time window -- no amount of window smoothing removes "
+                              "bias introduced by searching over many candidates.")
     parser.add_argument("--exploiter-every", type=int, default=0,
                          help="0 disables exploiter side-sessions")
     parser.add_argument("--exploiter-iterations", type=int, default=20)
@@ -334,7 +448,8 @@ def main():
     league = League.load(args.checkpoint_dir)
     adapter = ADAPTERS[args.model_type]
 
-    model = build_model(args.model_type, args.hidden, args.gnn_layers)
+    model = build_model(args.model_type, args.hidden, args.gnn_layers,
+                         public_hand_features=args.public_hand_features)
     init_ckpt = None
     if args.init_checkpoint is not None:
         init_ckpt = torch.load(args.init_checkpoint, map_location="cpu")
@@ -356,11 +471,54 @@ def main():
     else:
         print(f"resumed league with {len(league.members)} members, main={league.main_name}")
 
+    bc_anchor = None
+    if args.bc_anchor_dataset:
+        assert args.model_type == "hier", \
+            "--bc-anchor-dataset currently supports the hier model only (flat-obs demonstrations)"
+        bc_anchor = load_bc_anchor(args.bc_anchor_dataset, device,
+                                    max_samples=args.bc_anchor_samples, seed=args.seed)
+        expected_dim = observation_dim(public_hand_features=args.public_hand_features)
+        assert bc_anchor["obs"].shape[1] == expected_dim, (
+            f"anchor obs width {bc_anchor['obs'].shape[1]} != model obs width {expected_dim} -- "
+            f"collect the demonstrations with a matching --public-hand-features setting")
+        print(f"BC anchor: {bc_anchor['type_idx'].shape[0]} demos on {device}, "
+              f"coef={args.bc_anchor_coef}")
+
+    bc_holdout = None
+    best_holdout_nll = math.inf
+    best_holdout_iteration = None
+    if args.bc_holdout_dataset:
+        assert args.model_type == "hier", "--bc-holdout-dataset currently supports the hier model only"
+        bc_holdout = load_bc_anchor(args.bc_holdout_dataset, device, max_samples=args.bc_holdout_samples)
+        expected_dim = observation_dim(public_hand_features=args.public_hand_features)
+        assert bc_holdout["obs"].shape[1] == expected_dim, (
+            f"holdout obs width {bc_holdout['obs'].shape[1]} != model obs width {expected_dim}")
+        print(f"BC holdout: {bc_holdout['type_idx'].shape[0]} demos on {device} "
+              f"(early-stop selection signal)")
+
+    # Checkpoint selection / early stopping driven by the actual eval metric
+    # (--select-best-opponent's win rate), not a training-loss proxy -- see
+    # the flag's help text. State resets on process restart (not persisted
+    # across --init-checkpoint resumes), same scope as the bc_holdout tracking.
+    recent_eval_scores: deque[float] = deque(maxlen=args.best_eval_window)
+    best_eval_score = -math.inf
+    best_eval_iteration = None
+    stale_evals = 0
+    early_stopped = False
+
     env_kwargs = env_kwargs_from_args(args)
     rng = random.Random(args.seed)
-    base_seed = args.seed
 
-    for iteration in range(1, args.iterations + 1):
+    # Resume-safe iteration numbering: the league persists the last completed
+    # iteration, so a rerun continues from there instead of restarting at 1
+    # and silently overwriting historical_iter25 etc. with different weights
+    # while their old ratings survive. --iterations is "how many more".
+    start_iteration = league.last_iteration + 1
+    if league.last_iteration:
+        print(f"resuming at iteration {start_iteration} (league had completed {league.last_iteration})")
+    base_seed = args.seed + (start_iteration - 1) * args.episodes_per_iter
+
+    for iteration in range(start_iteration, start_iteration + args.iterations):
         t0 = time.time()
         use_self_play = rng.random() < args.self_play_prob
         opponent_agents, opponent_name, trainee_seat = None, None, None
@@ -384,12 +542,24 @@ def main():
                 gamma=args.gamma, lam=args.gae_lambda)
         base_seed += args.episodes_per_iter
 
+        bc_coef_now = annealed_bc_coef(args.bc_anchor_coef, args.bc_anchor_coef_final,
+                                        iteration, start_iteration, args.iterations)
         model.to(device)
         stats = ppo_update(model, optimizer, transitions, epochs=args.epochs, minibatch_size=args.minibatch_size,
                             adapter=adapter, device=device, clip_ratio=args.clip_ratio,
                             value_coef=args.value_coef, entropy_coef=args.entropy_coef,
                             max_grad_norm=args.max_grad_norm,
-                            target_kl=(args.target_kl if args.target_kl >= 0 else None))
+                            target_kl=(args.target_kl if args.target_kl >= 0 else None),
+                            bc_dataset=bc_anchor, bc_coef=bc_coef_now,
+                            bc_minibatch_size=args.bc_anchor_minibatch)
+
+        holdout_nll, is_best_holdout = None, False
+        if bc_holdout is not None:
+            holdout_nll = compute_holdout_nll(model, bc_holdout)
+            if holdout_nll < best_holdout_nll:
+                best_holdout_nll, best_holdout_iteration, is_best_holdout = holdout_nll, iteration, True
+                save_checkpoint(model, args.checkpoint_dir, "best_bc_holdout", iteration, optimizer=optimizer)
+
         model.to("cpu")
         elapsed = time.time() - t0
 
@@ -412,10 +582,19 @@ def main():
         mean_turns = sum(s["turns"] for s in summaries) / len(summaries)
         finish_rate = sum(1 for s in summaries if s["winner"] is not None) / len(summaries)
         mode = "self-play" if use_self_play else f"vs {opponent_name}"
+        bc_str = f" bc={stats['bc_loss']:.3f}@{bc_coef_now:.3f}" if "bc_loss" in stats else ""
+        holdout_str = f" holdout={holdout_nll:.3f}{'*' if is_best_holdout else ''}" if holdout_nll is not None else ""
         print(f"iter {iteration:4d} | {mode:<20s} | {len(transitions):5d} steps | {elapsed:5.1f}s | "
               f"turns={mean_turns:5.1f} finish={finish_rate:4.0%} | "
               f"pol={stats['policy_loss']:+.4f} val={stats['value_loss']:.4f} "
-              f"ent={stats['entropy']:.3f} kl={stats['approx_kl']:.4f}")
+              f"ent={stats['entropy']:.3f} kl={stats['approx_kl']:.4f}{bc_str}{holdout_str}")
+
+        # Crash-resilient checkpoint + persisted progress marker every
+        # iteration -- both cheap (a few MB / a small JSON) relative to
+        # losing up to eval_every iterations on an interruption.
+        save_checkpoint(model, args.checkpoint_dir, "latest", iteration, optimizer=optimizer)
+        league.last_iteration = iteration
+        league.save()
 
         if args.snapshot_every and iteration % args.snapshot_every == 0:
             name = f"historical_iter{iteration}"
@@ -429,11 +608,16 @@ def main():
         if args.exploiter_every and iteration % args.exploiter_every == 0:
             run_exploiter_session(league, args, iteration, env_kwargs, device)
 
-        if iteration % args.eval_every == 0 or iteration == args.iterations:
+        last_iteration_of_run = iteration == start_iteration + args.iterations - 1
+        if iteration % args.eval_every == 0 or last_iteration_of_run:
             if league.main_name is not None:
+                # Seed bases stride by the game count so successive evals use
+                # disjoint game sets (plain `+ iteration` made consecutive
+                # evals share most of their seeds).
                 wins, games, finished = evaluate_vs_member(
                     model, league, league.main_name, args.promotion_games,
-                    seed_base=700_000 + iteration, env_kwargs=env_kwargs, args=args,
+                    seed_base=700_000 + iteration * args.promotion_games,
+                    env_kwargs=env_kwargs, args=args,
                     num_workers=args.num_workers)
                 promoted = league.promotion_test(wins, games, args.promotion_win_rate, args.promotion_alpha)
                 print(f"  vs main ({league.main_name}): {wins}/{games} wins "
@@ -445,16 +629,86 @@ def main():
                                        mu=league.rating(league.main_name).mu, sigma=league.rating(league.main_name).sigma)
                     league.promote(name, iteration)
 
+            select_res = None
             for opp in ("random", "heuristic"):
-                res = evaluate_policy(model, opp, args.eval_games, seed_base=900_000 + iteration,
-                                       model_kind=args.model_type, num_workers=args.num_workers)
+                res = evaluate_policy(model, opp, args.eval_games,
+                                       seed_base=2_000_000 + iteration * args.eval_games,
+                                       model_kind=args.model_type, num_workers=args.num_workers,
+                                       public_hand_features=args.public_hand_features)
                 print(f"  eval vs {opp:<10} win_rate={res['win_rate']:.0%} "
                       f"finish_rate={res['finish_rate']:.0%} avg_vp={res['avg_vp']:.2f}")
+                if opp == args.select_best_opponent:
+                    select_res = res
 
             ratings_str = ", ".join(f"{m.name}={league.rating(m.name).mu:.1f}"
                                      for m in sorted(league.members.values(), key=lambda m: -league.rating(m.name).mu)[:6])
             print(f"  top ratings: {ratings_str}")
             league.save()
+
+            recent_eval_scores.append(select_res["win_rate"])
+            if len(recent_eval_scores) < args.best_eval_window:
+                # Window not yet full: deliberately withhold from the best/
+                # stale comparison below rather than compare a partial (1- or
+                # 2-sample) average against later full-window averages. An
+                # early run once locked its "best" onto a 2-sample average
+                # from the first two evals -- less diluted, so more likely to
+                # be an extreme value than any later fully-windowed average
+                # -- and then early-stopped 1000 iterations later having
+                # never revisited a checkpoint that outright beat it on a
+                # rigorous 240-game eval. Every comparison must be the same
+                # effective sample size.
+                print(f"  eval vs {args.select_best_opponent} raw={select_res['win_rate']:.1%} "
+                      f"(warming up selection window {len(recent_eval_scores)}/{args.best_eval_window})")
+            else:
+                smoothed = sum(recent_eval_scores) / len(recent_eval_scores)
+                if smoothed > best_eval_score + args.early_stop_min_delta:
+                    best_eval_score, best_eval_iteration, stale_evals = smoothed, iteration, 0
+                    save_checkpoint(model, args.checkpoint_dir, "best_eval", iteration, optimizer=optimizer)
+                    print(f"  new best_eval vs {args.select_best_opponent}: smoothed={smoothed:.1%} "
+                          f"(raw={select_res['win_rate']:.1%}, window={len(recent_eval_scores)}) -> best_eval.pt")
+                else:
+                    stale_evals += 1
+                    patience_str = str(args.early_stop_patience) if args.early_stop_patience else "off"
+                    print(f"  eval vs {args.select_best_opponent} smoothed={smoothed:.1%} "
+                          f"(best={best_eval_score:.1%} @ iter {best_eval_iteration}, "
+                          f"stale {stale_evals}/{patience_str})")
+                    if args.early_stop_patience and stale_evals >= args.early_stop_patience:
+                        print(f"  early stopping: no improvement in smoothed vs-{args.select_best_opponent} "
+                              f"win rate for {stale_evals} consecutive evals "
+                              f"(best={best_eval_score:.1%} at iter {best_eval_iteration})")
+                        early_stopped = True
+
+        if early_stopped:
+            break
+
+    if best_eval_iteration is not None:
+        print(f"best_eval: vs {args.select_best_opponent} smoothed_win_rate={best_eval_score:.1%} "
+              f"at iter {best_eval_iteration} -> {os.path.join(args.checkpoint_dir, 'best_eval.pt')}")
+    if bc_holdout is not None:
+        print(f"best_bc_holdout: NLL={best_holdout_nll:.4f} at iter {best_holdout_iteration} "
+              f"-> {os.path.join(args.checkpoint_dir, 'best_bc_holdout.pt')}")
+
+    if args.final_eval_games > 0:
+        print(f"\nconfirmatory eval ({args.final_eval_games} games vs {args.select_best_opponent} -- "
+              f"the trustworthy number; training-time smoothed readings above are optimistic, "
+              f"biased by having been the max over many noisy eval checkpoints):")
+        candidates = [("latest.pt (final)", model)]
+        if best_eval_iteration is not None:
+            best_model = build_model(args.model_type, args.hidden, args.gnn_layers,
+                                      public_hand_features=args.public_hand_features)
+            ckpt = torch.load(os.path.join(args.checkpoint_dir, "best_eval.pt"), map_location="cpu")
+            best_model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt)
+            candidates.append((f"best_eval.pt (iter {best_eval_iteration})", best_model))
+        confirmed = []
+        for label, m in candidates:
+            res = evaluate_policy(m, args.select_best_opponent, args.final_eval_games,
+                                   seed_base=9_000_000, model_kind=args.model_type,
+                                   num_workers=args.num_workers,
+                                   public_hand_features=args.public_hand_features)
+            print(f"  {label:<28s} win_rate={res['win_rate']:.1%} avg_vp={res['avg_vp']:.2f}")
+            confirmed.append((label, res["win_rate"]))
+        best_label, _ = max(confirmed, key=lambda x: x[1])
+        print(f"  -> recommended: {best_label}")
 
 
 if __name__ == "__main__":

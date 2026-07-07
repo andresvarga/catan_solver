@@ -11,7 +11,7 @@ from env.pettingzoo_env import CatanAECEnv, build_observation
 from env.state import DevCard, Phase, new_game
 from training.agent import HierarchicalLearnedAgent, load_hier_model
 from training.hier_model import (
-    HierarchicalActorCritic, match_action, stage1_mask, stage2_mask,
+    HierarchicalActorCritic, action_to_indices, group_by_type, match_action, stage1_mask, stage2_mask,
 )
 from training.hier_ppo import collect_rollout, collect_rollout_parallel, ppo_update
 from training.model import flatten_observation, observation_dim
@@ -240,6 +240,35 @@ def test_collect_rollout_summary_reports_ranking_and_trainee_seats():
         assert s["trainee_pids"] == [0]
         assert s["opponent_name"] == "random"
         assert set(s["ranking_pids"]) == {0, 1, 2, 3}
+
+
+def test_action_to_indices_is_the_exact_inverse_of_match_action():
+    """Behavior-cloning correctness depends entirely on this: every action a
+    demonstrator (heuristic, random) took must decompose into the same
+    (idx1, idx2) that match_action would reconstruct it from, across every
+    action type, over many random states."""
+    from agents.random_agent import choose as random_choose
+    engine = CatanEngine(randomize_board=True, seed=42)
+    rng = random.Random(42)
+    seen_types = set()
+    steps = 0
+    while not engine.done and steps < 3000:
+        state = engine.state
+        acts = legal_actions(state)
+        chosen = random_choose(state, rng, acts)
+        by_type = {}
+        for a in acts:
+            by_type.setdefault(a.type, []).append(a)
+        actions_of_type = by_type[chosen.type]
+        idx1, idx2 = action_to_indices(chosen.type, actions_of_type, chosen)
+        reconstructed = match_action(chosen.type, actions_of_type, idx1, idx2)
+        assert reconstructed == chosen, f"{chosen.type}: {reconstructed} != {chosen}"
+        seen_types.add(chosen.type)
+        engine.step(chosen)
+        steps += 1
+    # sanity: this game actually exercised a good spread of action types,
+    # not just BUILD_ROAD/END_TURN
+    assert len(seen_types) >= 8, f"only exercised {seen_types}"
 
 
 def test_hier_checkpoint_roundtrip_and_agent():

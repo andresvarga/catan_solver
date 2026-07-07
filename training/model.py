@@ -57,12 +57,17 @@ def flatten_observation(obs: dict) -> np.ndarray:
         obs["pending_trade_want"].astype(np.float32) / 19.0,
         _onehot(int(obs["pending_trade_proposer"][0]) + 1, NUM_PLAYERS + 1),
     ]
+    # Optional card-counting features (env's `public_hand_features` flag):
+    # keyed on presence so the same encoder serves both observation layouts.
+    if "public_est_resources" in obs:
+        parts.append(obs["public_est_resources"].astype(np.float32).reshape(-1) / 19.0)
+        parts.append(obs["public_est_unknown"].astype(np.float32) / 40.0)
     return np.concatenate(parts)
 
 
-def observation_dim() -> int:
+def observation_dim(public_hand_features: bool = False) -> int:
     from env.pettingzoo_env import CatanAECEnv
-    env = CatanAECEnv(randomize_board=False, seed=0)
+    env = CatanAECEnv(randomize_board=False, seed=0, public_hand_features=public_hand_features)
     env.reset(seed=0)
     obs = env.observe(env.agent_selection)
     return flatten_observation(obs).shape[0]
@@ -88,14 +93,16 @@ class ActorCritic(nn.Module):
         return logits, value
 
     def value(self, obs_batch: torch.Tensor) -> torch.Tensor:
-        """Value-only forward pass, used to bootstrap GAE at a truncated
-        (not truly terminal) episode boundary without sampling an action."""
+        """Value-only forward pass (no action sampling). Not used by the
+        training loop anymore -- truncation is treated as terminal in
+        compute_gae, so nothing bootstraps from it -- but kept as a cheap
+        utility for analysis and future centralized-critic work."""
         features = self.trunk(obs_batch)
         return self.value_head(features).squeeze(-1)
 
     def act(self, obs_batch: torch.Tensor, mask_batch: torch.Tensor, deterministic: bool = False):
         logits, value = self.forward(obs_batch, mask_batch)
-        dist = Categorical(logits=logits)
+        dist = Categorical(logits=logits, validate_args=False)
         action = torch.argmax(logits, dim=-1) if deterministic else dist.sample()
         logprob = dist.log_prob(action)
         entropy = dist.entropy()
@@ -104,7 +111,7 @@ class ActorCritic(nn.Module):
     def evaluate_actions(self, obs_batch: torch.Tensor, mask_batch: torch.Tensor,
                           actions: torch.Tensor):
         logits, value = self.forward(obs_batch, mask_batch)
-        dist = Categorical(logits=logits)
+        dist = Categorical(logits=logits, validate_args=False)
         logprob = dist.log_prob(actions)
         entropy = dist.entropy()
         return logprob, entropy, value

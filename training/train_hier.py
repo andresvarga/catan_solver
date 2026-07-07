@@ -26,18 +26,22 @@ from env.pettingzoo_env import CatanAECEnv
 from env.state import NUM_PLAYERS
 from training.agent import HierarchicalLearnedAgent
 from training.hier_model import HierarchicalActorCritic
-from training.hier_ppo import GAE_LAMBDA, GAMMA, collect_rollout, collect_rollout_parallel, ppo_update
+from training.hier_ppo import (
+    GAE_LAMBDA, GAMMA, collect_rollout, collect_rollout_parallel, ppo_update, reseed_forked_worker,
+)
 from training.model import observation_dim
 from training.model_adapters import ADAPTERS
 
 OPPONENT_FACTORIES = {"random": RandomAgent, "heuristic": HeuristicAgent}
 
 
-def build_model(model_type: str, hidden: int, gnn_layers: int):
+def build_model(model_type: str, hidden: int, gnn_layers: int,
+                public_hand_features: bool = False):
     if model_type == "gnn":
         from training.gnn_model import GraphActorCritic
-        return GraphActorCritic(hidden=hidden, gnn_layers=gnn_layers)
-    return HierarchicalActorCritic(obs_dim=observation_dim(), hidden=hidden)
+        return GraphActorCritic(hidden=hidden, gnn_layers=gnn_layers,
+                                 public_hand_features=public_hand_features)
+    return HierarchicalActorCritic(obs_dim=observation_dim(public_hand_features), hidden=hidden)
 
 
 def move_optimizer_state(optimizer: torch.optim.Optimizer, device: str) -> None:
@@ -62,15 +66,18 @@ def env_kwargs_from_args(args: argparse.Namespace) -> dict:
         allow_dev_cards=not args.no_dev_cards,
         vp_shaping_weight=args.vp_shaping_weight,
         max_episode_steps=args.max_episode_steps,
+        public_hand_features=args.public_hand_features,
     )
 
 
 def _play_eval_game(model, opponent_cls, seed: int, randomize_board: bool, allow_trading: bool,
-                     allow_dev_cards: bool, max_steps: int, model_kind: str) -> tuple[bool, bool, int]:
+                     allow_dev_cards: bool, max_steps: int, model_kind: str,
+                     public_hand_features: bool = False) -> tuple[bool, bool, int]:
     """Trainee (deterministic, seat 0) vs. 3 copies of `opponent_cls`. Returns (won, finished, vp)."""
     engine = CatanEngine(randomize_board=randomize_board, seed=seed,
                           allow_trading=allow_trading, allow_dev_cards=allow_dev_cards)
-    agents = {0: HierarchicalLearnedAgent(0, model=model, deterministic=True, model_kind=model_kind)}
+    agents = {0: HierarchicalLearnedAgent(0, model=model, deterministic=True, model_kind=model_kind,
+                                           public_hand_features=public_hand_features)}
     for pid in range(1, NUM_PLAYERS):
         agents[pid] = opponent_cls(pid, random.Random(seed * 97 + pid))
     steps = 0
@@ -98,6 +105,7 @@ _eval_worker_kwargs: dict = {}
 def _init_eval_worker(model, opponent_cls, kwargs: dict) -> None:
     global _eval_worker_model, _eval_worker_opponent_cls, _eval_worker_kwargs
     torch.set_num_threads(1)
+    reseed_forked_worker()
     model.eval()
     _eval_worker_model = model
     _eval_worker_opponent_cls = opponent_cls
@@ -118,10 +126,12 @@ def _eval_worker_play(seeds: list[int]) -> tuple[int, int, int]:
 def evaluate_policy(model, opponent_kind: str, games: int, seed_base: int,
                      randomize_board: bool = True, allow_trading: bool = True,
                      allow_dev_cards: bool = True, max_steps: int = 4000,
-                     model_kind: str = "hier", num_workers: int = 1) -> dict:
+                     model_kind: str = "hier", num_workers: int = 1,
+                     public_hand_features: bool = False) -> dict:
     opponent_cls = OPPONENT_FACTORIES[opponent_kind]
     kwargs = dict(randomize_board=randomize_board, allow_trading=allow_trading,
-                  allow_dev_cards=allow_dev_cards, max_steps=max_steps, model_kind=model_kind)
+                  allow_dev_cards=allow_dev_cards, max_steps=max_steps, model_kind=model_kind,
+                  public_hand_features=public_hand_features)
     seeds = [seed_base + i for i in range(games)]
 
     if num_workers <= 1:
@@ -159,6 +169,11 @@ def main():
     parser.add_argument("--no-trading", action="store_true")
     parser.add_argument("--no-dev-cards", action="store_true")
     parser.add_argument("--randomize-board", action="store_true", default=False)
+    parser.add_argument("--public-hand-features", action="store_true",
+                         help="expose the engine's publicly-inferable per-player resource "
+                              "estimates (card counting) as observation features. Widens the "
+                              "observation, so checkpoints are only compatible across runs "
+                              "using the same setting of this flag.")
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--eval-games", type=int, default=30)
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints_hier")
@@ -201,7 +216,8 @@ def main():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     adapter = ADAPTERS[args.model_type]
 
-    model = build_model(args.model_type, args.hidden, args.gnn_layers)
+    model = build_model(args.model_type, args.hidden, args.gnn_layers,
+                         public_hand_features=args.public_hand_features)
     init_ckpt = None
     if args.init_checkpoint is not None:
         init_ckpt = torch.load(args.init_checkpoint, map_location="cpu")
@@ -245,15 +261,28 @@ def main():
               f"pol={stats['policy_loss']:+.4f} val={stats['value_loss']:.4f} "
               f"ent={stats['entropy']:.3f} kl={stats['approx_kl']:.4f}")
 
+        # Crash-resilient checkpoint: a few MB and <100ms per iteration, vs.
+        # losing up to eval_every iterations of progress on an interruption.
+        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                    "iteration": iteration, "args": vars(args)},
+                   os.path.join(args.checkpoint_dir, "latest.pt"))
+
         if iteration % args.eval_every == 0 or iteration == args.iterations:
             for opp in ("random", "heuristic"):
-                same = evaluate_policy(model, opp, args.eval_games, seed_base=800_000 + iteration,
+                # Seed bases stride by eval_games so successive evals use
+                # disjoint game sets (plain `+ iteration` made consecutive
+                # evals share most of their seeds).
+                same = evaluate_policy(model, opp, args.eval_games,
+                                        seed_base=800_000 + iteration * args.eval_games,
                                         randomize_board=args.randomize_board,
                                         allow_trading=not args.no_trading,
                                         allow_dev_cards=not args.no_dev_cards,
-                                        model_kind=args.model_type, num_workers=args.num_workers)
-                full = evaluate_policy(model, opp, args.eval_games, seed_base=900_000 + iteration,
-                                        model_kind=args.model_type, num_workers=args.num_workers)
+                                        model_kind=args.model_type, num_workers=args.num_workers,
+                                        public_hand_features=args.public_hand_features)
+                full = evaluate_policy(model, opp, args.eval_games,
+                                        seed_base=2_000_000 + iteration * args.eval_games,
+                                        model_kind=args.model_type, num_workers=args.num_workers,
+                                        public_hand_features=args.public_hand_features)
                 print(f"  eval vs {opp:<10} [same-dist] win_rate={same['win_rate']:.0%} "
                       f"finish_rate={same['finish_rate']:.0%} avg_vp={same['avg_vp']:.2f}  "
                       f"[full-ruleset] win_rate={full['win_rate']:.0%} "

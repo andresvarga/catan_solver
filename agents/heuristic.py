@@ -79,8 +79,11 @@ class HeuristicAgent:
         self._trade_proposals_this_turn = 0
 
     # -- dispatch -----------------------------------------------------------
-    def choose(self, state: GameState) -> Action:
-        actions = legal_actions(state)
+    def choose(self, state: GameState, legal: list[Action] | None = None) -> Action:
+        """`legal` lets a caller that already enumerated this step's legal
+        actions (e.g. the rollout loop, via the env's cache) pass them in
+        instead of paying for a second enumeration."""
+        actions = legal if legal is not None else legal_actions(state)
         if not actions:
             raise RuntimeError(f"No legal actions in phase {state.phase}")
         if len(actions) == 1:

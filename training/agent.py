@@ -28,8 +28,8 @@ class LearnedAgent:
             raise ValueError("LearnedAgent needs either model= or checkpoint_path=")
         self.model.eval()
 
-    def choose(self, state: GameState):
-        actions = legal_actions(state)
+    def choose(self, state: GameState, legal: list | None = None):
+        actions = legal if legal is not None else legal_actions(state)
         if not actions:
             raise RuntimeError(f"No legal actions in phase {state.phase}")
         if len(actions) == 1:
@@ -38,7 +38,7 @@ class LearnedAgent:
         obs = build_observation(state, actor, actions, show_mask=True)
         flat = torch.tensor(flatten_observation(obs), dtype=torch.float32).unsqueeze(0)
         mask = torch.tensor(obs["action_mask"], dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
+        with torch.inference_mode():
             action_t, *_ = self.model.act(flat, mask, deterministic=self.deterministic)
         return actions[int(action_t.item())]
 
@@ -63,22 +63,27 @@ class HierarchicalLearnedAgent:
 
     def __init__(self, player_id: int, rng: random.Random | None = None,
                  model=None, checkpoint_path: str | None = None, deterministic: bool = True,
-                 model_kind: str = "hier"):
+                 model_kind: str = "hier", public_hand_features: bool = False):
         self.player_id = player_id
         self.rng = rng or random.Random()
         self.deterministic = deterministic
         self.model_kind = model_kind
+        # Must match the flag the model was trained with -- it changes the
+        # observation width (a mismatch fails loudly at the first forward).
+        self.public_hand_features = public_hand_features
         if model is not None:
             self.model = model
         elif checkpoint_path is not None:
-            loader = load_gnn_model if model_kind == "gnn" else load_hier_model
-            self.model = loader(checkpoint_path)
+            if model_kind == "gnn":
+                self.model = load_gnn_model(checkpoint_path, public_hand_features=public_hand_features)
+            else:
+                self.model = load_hier_model(checkpoint_path, public_hand_features=public_hand_features)
         else:
             raise ValueError("HierarchicalLearnedAgent needs either model= or checkpoint_path=")
         self.model.eval()
 
-    def choose(self, state: GameState):
-        actions = legal_actions(state)
+    def choose(self, state: GameState, legal: list | None = None):
+        actions = legal if legal is not None else legal_actions(state)
         if not actions:
             raise RuntimeError(f"No legal actions in phase {state.phase}")
         if len(actions) == 1:
@@ -86,19 +91,21 @@ class HierarchicalLearnedAgent:
         actor = acting_player(state)
         if self.model_kind == "gnn":
             from training.graph_features import build_graph_observation
-            encoded = build_graph_observation(state, actor)
+            encoded = build_graph_observation(state, actor,
+                                               public_hand_features=self.public_hand_features)
             obs_t = {k: torch.tensor(v, dtype=torch.float32).unsqueeze(0) for k, v in encoded.items()}
         else:
-            obs = build_observation(state, actor, actions, show_mask=True)
+            obs = build_observation(state, actor, actions, show_mask=True,
+                                     public_hand_features=self.public_hand_features)
             obs_t = torch.tensor(flatten_observation(obs), dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
+        with torch.inference_mode():
             action, *_ = self.model.act(obs_t, actions, deterministic=self.deterministic)
         return action
 
 
-def load_hier_model(checkpoint_path: str, hidden: int = 256):
+def load_hier_model(checkpoint_path: str, hidden: int = 256, public_hand_features: bool = False):
     from training.hier_model import HierarchicalActorCritic
-    obs_dim = observation_dim()
+    obs_dim = observation_dim(public_hand_features=public_hand_features)
     model = HierarchicalActorCritic(obs_dim=obs_dim, hidden=hidden)
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(state_dict["model"] if "model" in state_dict else state_dict)
@@ -106,9 +113,11 @@ def load_hier_model(checkpoint_path: str, hidden: int = 256):
     return model
 
 
-def load_gnn_model(checkpoint_path: str, hidden: int = 128, gnn_layers: int = 3):
+def load_gnn_model(checkpoint_path: str, hidden: int = 128, gnn_layers: int = 3,
+                   public_hand_features: bool = False):
     from training.gnn_model import GraphActorCritic
-    model = GraphActorCritic(hidden=hidden, gnn_layers=gnn_layers)
+    model = GraphActorCritic(hidden=hidden, gnn_layers=gnn_layers,
+                              public_hand_features=public_hand_features)
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(state_dict["model"] if "model" in state_dict else state_dict)
     model.eval()

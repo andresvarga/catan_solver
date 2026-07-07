@@ -25,6 +25,7 @@ rather than a duplicated `gnn_ppo.py`.
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 
 import numpy as np
 import torch
@@ -32,6 +33,7 @@ import torch.nn as nn
 
 from env.engine import total_vp
 from env.pettingzoo_env import CatanAECEnv
+from training.hier_model import prepare_transition_batch
 from training.model_adapters import FLAT_ADAPTER, ModelAdapter
 from training.ppo import GAE_LAMBDA, GAMMA, compute_gae
 
@@ -60,31 +62,28 @@ def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
 
         if agent in pending:
             p = pending.pop(agent)
-            bootstrap_value = 0.0
-            if trunc and not term:
-                # Truncated (hit max_episode_steps), not a true win/loss: bootstrap
-                # with the model's own value estimate of the final observation
-                # instead of treating it as if there were no future reward.
-                encoded_final = adapter.encode(env, obs, pid)
-                obs_final_t = adapter.to_single(encoded_final, device)
-                with torch.no_grad():
-                    bootstrap_value = float(model.value(obs_final_t).item())
+            # No bootstrap value on truncation: the env's rank-on-standing
+            # terminal reward already stands in for the remaining return, and
+            # compute_gae treats truncation as terminal -- see its docstring.
             episode_data[agent].append({
                 **p, "reward": reward, "terminated": term, "truncated": trunc,
-                "done": done, "bootstrap_value": bootstrap_value,
+                "done": done,
             })
 
         if done:
             action_idx = None
         elif pid in opponent_agents:
+            # Pass the env's cached legal-action list through so the agent
+            # doesn't re-enumerate it, and so its chosen Action is (usually)
+            # the same object -- making the .index() lookup an identity scan.
             legal = env.legal_actions()
-            concrete_action = opponent_agents[pid].choose(env.engine.state)
+            concrete_action = opponent_agents[pid].choose(env.engine.state, legal)
             action_idx = legal.index(concrete_action)
         else:
             legal = env.legal_actions()
             encoded = adapter.encode(env, obs, pid)
             obs_t = adapter.to_single(encoded, device)
-            with torch.no_grad():
+            with torch.inference_mode():
                 concrete_action, logprob, value, head_data = model.act(obs_t, legal, deterministic=False)
             action_idx = legal.index(concrete_action)
             pending[agent] = {"obs": encoded, "logprob": logprob, "value": value, **head_data}
@@ -154,12 +153,32 @@ _worker_gamma: float = GAMMA
 _worker_lam: float = GAE_LAMBDA
 
 
+def reseed_forked_worker(opponent_agents: dict[int, object] | None = None) -> None:
+    """Give this forked worker its own RNG streams. fork copies the parent's
+    torch RNG state byte-for-byte, so without this every worker's
+    `dist.sample()`/`multinomial` stream is identical -- correlated
+    exploration noise across supposedly independent workers. Same story for
+    opponent agents' `random.Random` instances, which were constructed in the
+    parent and inherited by every worker. PID-derived seeds keep the streams
+    distinct per worker (per-run reproducibility of parallel rollouts was
+    already off the table -- fork inherits whatever parent RNG state existed
+    at pool creation)."""
+    pid_salt = os.getpid() * 0x9E3779B1
+    torch.manual_seed((torch.initial_seed() ^ pid_salt) % (2 ** 63))
+    if opponent_agents:
+        for seat, agent in opponent_agents.items():
+            rng = getattr(agent, "rng", None)
+            if rng is not None:
+                rng.seed(pid_salt + seat)
+
+
 def _init_worker(model, env_kwargs: dict, opponent_agents: dict[int, object] | None,
                   opponent_name: str | None, adapter: ModelAdapter,
                   gamma: float = GAMMA, lam: float = GAE_LAMBDA) -> None:
     global _worker_model, _worker_env_kwargs, _worker_opponent_agents, _worker_opponent_name
     global _worker_adapter, _worker_gamma, _worker_lam
     torch.set_num_threads(1)  # avoid N workers each spawning their own thread pool
+    reseed_forked_worker(opponent_agents)
     model.eval()
     _worker_model = model
     _worker_env_kwargs = env_kwargs
@@ -208,10 +227,49 @@ def collect_rollout_parallel(env_kwargs: dict, model,
     return all_transitions, all_summaries
 
 
-def _index_batch(batch, idx: np.ndarray):
+def load_bc_anchor(path: str, device: str, max_samples: int | None = None,
+                    seed: int = 0) -> dict[str, torch.Tensor]:
+    """Load a demonstration dataset (scripts/collect_heuristic_demos.py .npz)
+    as device-resident tensors for use as a BC anchor in `ppo_update`. The
+    arrays are already in the exact prepared-transition-batch layout
+    `evaluate_actions` consumes. `max_samples` subsamples (without
+    replacement, seeded) to bound device memory -- ~2.7 KB/sample."""
+    npz = np.load(path)
+    n = npz["type_idx"].shape[0]
+    idx = None
+    if max_samples is not None and n > max_samples:
+        idx = np.random.RandomState(seed).choice(n, max_samples, replace=False)
+    return {k: torch.as_tensor(npz[k] if idx is None else npz[k][idx], device=device)
+            for k in npz.files}
+
+
+def compute_holdout_nll(model, holdout: dict[str, torch.Tensor], batch_size: int = 8192) -> float:
+    """Mean negative log-likelihood of a held-out demonstration set under the
+    current policy -- the generalization signal for detecting BC-anchor
+    erosion and selecting an early-stopped checkpoint. Deliberately
+    independent of whatever subsample `load_bc_anchor` is using as the
+    anchor term: the anchor dataset is what the loss directly optimizes
+    (so its NLL improving is partly just fitting), while this dataset is
+    never trained on, so its NLL rising is a real drift signal. Chunked to
+    bound peak memory on large holdout sets."""
+    model.eval()
+    n = holdout["type_idx"].shape[0]
+    total = 0.0
+    with torch.inference_mode():
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            tb = {k: v[start:end] for k, v in holdout.items() if k != "obs"}
+            logprob, _, _ = model.evaluate_actions(holdout["obs"][start:end], tb)
+            total += float(logprob.sum())
+    model.train()
+    return -total / n
+
+
+def _index_batch(batch, idx):
     """Index into an already-batched observation (a plain Tensor for
     FLAT_ADAPTER, or a dict[str, Tensor] for GRAPH_ADAPTER) without rebuilding
-    it from the underlying Python/numpy observations."""
+    it from the underlying Python/numpy observations. `idx` is a long Tensor
+    (or anything torch fancy-indexing accepts)."""
     if isinstance(batch, dict):
         return {k: v[idx] for k, v in batch.items()}
     return batch[idx]
@@ -221,34 +279,54 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
                clip_ratio: float = 0.2, value_coef: float = 0.5, entropy_coef: float = 0.01,
                epochs: int = 4, minibatch_size: int = 256, max_grad_norm: float = 0.5,
                device: str = "cpu", adapter: ModelAdapter = FLAT_ADAPTER,
-               target_kl: float | None = 0.02) -> dict:
-    old_logprobs_all = np.array([t["logprob"] for t in transitions], dtype=np.float32)
+               target_kl: float | None = 0.02,
+               bc_dataset: dict[str, torch.Tensor] | None = None, bc_coef: float = 0.0,
+               bc_minibatch_size: int = 512) -> dict:
+    """`bc_dataset`/`bc_coef`: optional BC anchor (see `load_bc_anchor`).
+    Each gradient step adds `bc_coef * NLL(demonstrated actions)` on a fresh
+    random demo minibatch. Near the BC optimum this gradient is ~zero, and it
+    grows as the policy drifts from the demonstrated behavior -- so PPO can
+    only move the policy away from the demonstrations where the clipped
+    surrogate gain outweighs the anchor penalty (the AlphaStar-style guard
+    against RL fine-tuning destroying cloned skills). The demo forward pass
+    shares no rows with the rollout minibatch, so the value/entropy terms are
+    untouched by anchor rows."""
     advantages_all = np.array([t["advantage"] for t in transitions], dtype=np.float32)
-    returns_all = np.array([t["return"] for t in transitions], dtype=np.float32)
     advantages_all = (advantages_all - advantages_all.mean()) / (advantages_all.std() + 1e-8)
 
-    # Build the whole rollout's observation batch once, not once per
-    # minibatch per epoch -- this used to rebuild (Python list -> np.array ->
-    # torch.tensor, or a whole dict-of-arrays for the GNN adapter) on every
-    # single minibatch, `epochs` times over.
+    # Build the whole rollout's tensors once, not once per minibatch per
+    # epoch -- observations (this used to rebuild a Python list -> np.array
+    # -> torch.tensor, or a whole dict-of-arrays for the GNN adapter, on
+    # every single minibatch), the per-transition head data (masks/indices/
+    # active-head ids for evaluate_actions), and the PPO scalars. Minibatches
+    # then just index into device-resident tensors.
     obs_batch_full = adapter.to_batch([t["obs"] for t in transitions], device)
+    eval_batch_full = prepare_transition_batch(transitions, device)
+    old_logprobs_full = torch.tensor([t["logprob"] for t in transitions], dtype=torch.float32, device=device)
+    advantages_full = torch.as_tensor(advantages_all, device=device)
+    returns_full = torch.tensor([t["return"] for t in transitions], dtype=torch.float32, device=device)
 
     n = len(transitions)
     idx = np.arange(n)
     stats = {"policy_loss": [], "value_loss": [], "entropy": [], "approx_kl": [], "clip_frac": []}
+    use_bc = bc_dataset is not None and bc_coef > 0
+    if use_bc:
+        stats["bc_loss"] = []
+        n_demo = bc_dataset["type_idx"].shape[0]
 
     for _ in range(epochs):
         np.random.shuffle(idx)
         epoch_kls = []
         for start in range(0, n, minibatch_size):
             mb = idx[start:start + minibatch_size]
-            mb_transitions = [transitions[i] for i in mb]
-            obs_batch = _index_batch(obs_batch_full, mb)
-            old_logprob = torch.tensor(old_logprobs_all[mb], dtype=torch.float32, device=device)
-            adv = torch.tensor(advantages_all[mb], dtype=torch.float32, device=device)
-            ret = torch.tensor(returns_all[mb], dtype=torch.float32, device=device)
+            mb_t = torch.as_tensor(mb, dtype=torch.long, device=device)
+            obs_batch = _index_batch(obs_batch_full, mb_t)
+            eval_batch = {k: v[mb_t] for k, v in eval_batch_full.items()}
+            old_logprob = old_logprobs_full[mb_t]
+            adv = advantages_full[mb_t]
+            ret = returns_full[mb_t]
 
-            logprob, entropy, value = model.evaluate_actions(obs_batch, mb_transitions)
+            logprob, entropy, value = model.evaluate_actions(obs_batch, eval_batch)
             ratio = torch.exp(logprob - old_logprob)
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * adv
@@ -256,6 +334,14 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
             value_loss = ((value - ret) ** 2).mean()
             entropy_loss = -entropy.mean()
             loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
+
+            if use_bc:
+                demo_idx = torch.randint(n_demo, (min(bc_minibatch_size, n_demo),), device=device)
+                demo_tb = {k: v[demo_idx] for k, v in bc_dataset.items() if k != "obs"}
+                demo_logprob, _, _ = model.evaluate_actions(bc_dataset["obs"][demo_idx], demo_tb)
+                bc_loss = -demo_logprob.mean()
+                loss = loss + bc_coef * bc_loss
+                stats["bc_loss"].append(bc_loss.item())
 
             optimizer.zero_grad()
             loss.backward()

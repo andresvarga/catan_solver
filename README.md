@@ -34,6 +34,13 @@ Python/env overhead anyway (GPU wouldn't help there).
 - `env/state.py` — game state dataclasses, dev cards, building costs.
 - `env/engine.py` — the rules engine: legality, turn/phase state machine,
   dice production, robber, trading, longest road / largest army, win check.
+  Also maintains publicly-inferable per-player resource estimates (card
+  counting: every flow except robber-steal identity and discard contents is
+  public in Catan) — exposed as observation features via the
+  `--public-hand-features` training flag / `CatanAECEnv(public_hand_features=True)`.
+  Off by default; the flag widens the observation, so checkpoints are only
+  compatible across runs with the same setting — train an A/B pair to
+  measure its effect on robber targeting and trade evaluation.
 - `env/actions.py` — the action-type inventory.
 - `env/pettingzoo_env.py` — PettingZoo AEC wrapper (`CatanAECEnv`) with a
   structured `Dict` observation and a masked `Discrete(400)` action space
@@ -53,6 +60,14 @@ Python/env overhead anyway (GPU wouldn't help there).
 - `scripts/evaluate.py` — tournament runner: seat any mix of agent kinds
   (`--seats heuristic,random,random,random`), reports win rate/avg VP/turns
   to finish per agent kind (§12 of the design doc).
+- `scripts/record_replay.py` — plays a checkpoint through a full game and
+  writes a self-contained HTML replay viewer (board, hands, action log,
+  play/pause/step/seek) with per-decision model diagnostics: value estimate,
+  masked type distribution, and *attempted-illegal probability mass* (the
+  pre-mask probability the policy put on rule-breaking options -- masking
+  makes illegal moves impossible to execute, so this is the observable form
+  of "the model tried an illegal move"). `--out replay.html`, open in any
+  browser; "Next flagged" jumps straight to suspicious decisions.
 - `tests/` — pytest suite: board invariants, rules/legality, scoring,
   PettingZoo API compliance (via `pettingzoo.test.api_test`), heuristic-
   vs-random / heuristic-vs-heuristic tournament checks, and the PPO/model

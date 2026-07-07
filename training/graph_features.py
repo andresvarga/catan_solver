@@ -19,15 +19,25 @@ from env.state import DevCard, GameState, Phase
 RESOURCE_LIST = list(Resource)
 DEV_CARD_LIST = list(DevCard)
 PHASE_LIST = list(Phase)
+RESOURCE_INDEX = {r: i for i, r in enumerate(Resource)}
+TERRAIN_INDEX = {t: i for i, t in enumerate(HexType)}
+PHASE_INDEX = {p: i for i, p in enumerate(Phase)}
 
 HEX_FEAT_DIM = 9       # 6 terrain one-hot + number/12 + pips/5 + robber flag
 VERTEX_FEAT_DIM = 15   # 5 owner-relative one-hot + 3 type one-hot + port_generic + 6 port-resource one-hot
 EDGE_FEAT_DIM = 5      # 5 owner-relative one-hot
 PLAYER_FEAT_DIM = 23
 OPPONENT_FEAT_DIM = 9
+# Appended per opponent row when `public_hand_features` is on: the engine's
+# publicly-inferable resource estimate (5) + unknown-identity card count (1).
+PUBLIC_HAND_FEAT_DIM = 6
 NUM_OPPONENTS = 3
 CONTEXT_FEAT_DIM = 25
 SELF_ID_DIM = 4  # one-hot of the observing player's absolute seat (0-3)
+
+
+def opponent_feat_dim(public_hand_features: bool = False) -> int:
+    return OPPONENT_FEAT_DIM + (PUBLIC_HAND_FEAT_DIM if public_hand_features else 0)
 
 
 def _relative_seat_onehot(owner: int | None, me: int, size: int = 5) -> np.ndarray:
@@ -42,52 +52,75 @@ def _relative_seat_onehot(owner: int | None, me: int, size: int = 5) -> np.ndarr
     return v
 
 
-def build_graph_observation(state: GameState, pid: int) -> dict[str, np.ndarray]:
+def _static_graph_arrays(board) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Feature-array bases derived purely from the immutable board layout:
+    hex terrain/number/pips (robber column left 0), vertex port columns with
+    owner/building columns preset to their "none" one-hots, and edges preset
+    to unowned. Computed once per board and cached on the Board object;
+    callers copy and overwrite only the (few) dynamic entries."""
+    cached = getattr(board, "_graph_obs_static", None)
+    if cached is None:
+        hex_base = np.zeros((19, HEX_FEAT_DIM), dtype=np.float32)
+        for hx in board.hexes.values():
+            row = hex_base[hx.id]
+            row[TERRAIN_INDEX[hx.terrain]] = 1.0
+            row[6] = (hx.number or 0) / 12.0
+            row[7] = PIP_COUNT.get(hx.number, 0) / 5.0
+
+        vertex_base = np.zeros((54, VERTEX_FEAT_DIM), dtype=np.float32)
+        vertex_base[:, 0] = 1.0  # owner: none
+        vertex_base[:, 5] = 1.0  # building: none
+        for vid, v in board.vertices.items():
+            row = vertex_base[vid]
+            row[8] = 1.0 if v.port_generic else 0.0
+            if v.port is None:
+                row[9] = 1.0
+            else:
+                row[10 + RESOURCE_INDEX[v.port]] = 1.0
+
+        edge_base = np.zeros((72, EDGE_FEAT_DIM), dtype=np.float32)
+        edge_base[:, 0] = 1.0  # owner: none
+        cached = (hex_base, vertex_base, edge_base)
+        board._graph_obs_static = cached
+    return cached
+
+
+def _relative_slot(owner: int, me: int) -> int:
+    return 1 if owner == me else 2 + ((owner - me - 1) % 3)
+
+
+def build_graph_observation(state: GameState, pid: int,
+                             public_hand_features: bool = False) -> dict[str, np.ndarray]:
     board = state.board
     me = state.players[pid]
+    hex_base, vertex_base, edge_base = _static_graph_arrays(board)
 
-    terrain_order = list(HexType)
+    hex_features = hex_base.copy()
+    hex_features[board.robber_hex, 8] = 1.0
 
-    hex_features = np.zeros((19, HEX_FEAT_DIM), dtype=np.float32)
-    for hx in board.hexes.values():
-        row = hex_features[hx.id]
-        row[terrain_order.index(hx.terrain)] = 1.0
-        row[6] = (hx.number or 0) / 12.0
-        row[7] = PIP_COUNT.get(hx.number, 0) / 5.0
-        row[8] = 1.0 if board.robber_hex == hx.id else 0.0
-
-    owner_of: dict[int, tuple[int, str]] = {}
+    vertex_features = vertex_base.copy()
     for other_pid, p in state.players.items():
+        slot = _relative_slot(other_pid, pid)
         for vid in p.settlements:
-            owner_of[vid] = (other_pid, "settlement")
-        for vid in p.cities:
-            owner_of[vid] = (other_pid, "city")
-
-    vertex_features = np.zeros((54, VERTEX_FEAT_DIM), dtype=np.float32)
-    for vid, v in board.vertices.items():
-        row = vertex_features[vid]
-        owner, kind = owner_of.get(vid, (None, None))
-        row[0:5] = _relative_seat_onehot(owner, pid)
-        if kind is None:
-            row[5] = 1.0
-        elif kind == "settlement":
+            row = vertex_features[vid]
+            row[0] = 0.0
+            row[slot] = 1.0
+            row[5] = 0.0
             row[6] = 1.0
-        else:
+        for vid in p.cities:
+            row = vertex_features[vid]
+            row[0] = 0.0
+            row[slot] = 1.0
+            row[5] = 0.0
             row[7] = 1.0
-        row[8] = 1.0 if v.port_generic else 0.0
-        if v.port is None:
-            row[9] = 1.0
-        else:
-            row[10 + RESOURCE_LIST.index(v.port)] = 1.0
 
-    road_owner: dict[int, int] = {}
+    edge_features = edge_base.copy()
     for other_pid, p in state.players.items():
+        slot = _relative_slot(other_pid, pid)
         for eid in p.roads:
-            road_owner[eid] = other_pid
-
-    edge_features = np.zeros((72, EDGE_FEAT_DIM), dtype=np.float32)
-    for eid in board.edges:
-        edge_features[eid] = _relative_seat_onehot(road_owner.get(eid), pid)
+            row = edge_features[eid]
+            row[0] = 0.0
+            row[slot] = 1.0
 
     player_features = np.zeros(PLAYER_FEAT_DIM, dtype=np.float32)
     player_features[0:5] = [me.resources[r] / 19.0 for r in RESOURCE_LIST]
@@ -102,7 +135,8 @@ def build_graph_observation(state: GameState, pid: int) -> dict[str, np.ndarray]
     player_features[21] = 1.0 if state.longest_road_holder == pid else 0.0
     player_features[22] = 1.0 if state.largest_army_holder == pid else 0.0
 
-    opponent_features = np.zeros((NUM_OPPONENTS, OPPONENT_FEAT_DIM), dtype=np.float32)
+    opponent_features = np.zeros((NUM_OPPONENTS, opponent_feat_dim(public_hand_features)),
+                                  dtype=np.float32)
     for offset in range(NUM_OPPONENTS):
         opp_pid = (pid + 1 + offset) % 4
         p = state.players[opp_pid]
@@ -116,17 +150,24 @@ def build_graph_observation(state: GameState, pid: int) -> dict[str, np.ndarray]
         row[6] = p.total_dev_cards() / 25.0
         row[7] = 1.0 if state.longest_road_holder == opp_pid else 0.0
         row[8] = 1.0 if state.largest_army_holder == opp_pid else 0.0
+        if public_hand_features:
+            est = state.public_resource_estimates[opp_pid]
+            identified = 0.0
+            for i, r in enumerate(RESOURCE_LIST):
+                row[9 + i] = est[r] / 19.0
+                identified += est[r]
+            row[14] = max(0.0, p.hand_size() - identified) / 40.0  # unknown-identity cards
 
     context_features = np.zeros(CONTEXT_FEAT_DIM, dtype=np.float32)
-    context_features[PHASE_LIST.index(state.phase)] = 1.0
+    context_features[PHASE_INDEX[state.phase]] = 1.0
     dice = state.dice_roll or (0, 0)
     context_features[8] = dice[0] / 6.0
     context_features[9] = dice[1] / 6.0
     if state.pending_trade is not None:
         for r, amt in state.pending_trade.give.items():
-            context_features[10 + RESOURCE_LIST.index(r)] = amt / 19.0
+            context_features[10 + RESOURCE_INDEX[r]] = amt / 19.0
         for r, amt in state.pending_trade.want.items():
-            context_features[15 + RESOURCE_LIST.index(r)] = amt / 19.0
+            context_features[15 + RESOURCE_INDEX[r]] = amt / 19.0
         context_features[20:25] = _relative_seat_onehot(state.pending_trade.proposer, pid)
     else:
         context_features[20] = 1.0
