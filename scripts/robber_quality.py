@@ -106,11 +106,16 @@ def make_evaluated_agent(args, seat: int):
         return RandomAgent(seat, random.Random(seat * 7919 + 13))
     if args.agent == "heuristic":
         return HeuristicAgent(seat, random.Random(seat * 7919 + 13))
-    from training.agent import HierarchicalLearnedAgent, load_hier_model
+    from training.agent import HierarchicalLearnedAgent, load_gnn_model, load_hier_model
     if args.checkpoint not in _model_cache:  # once per worker process, not per game
-        _model_cache[args.checkpoint] = load_hier_model(
-            args.checkpoint, hidden=args.hidden,
-            public_hand_features=args.public_hand_features)
+        if args.model_type == "gnn":
+            _model_cache[args.checkpoint] = load_gnn_model(
+                args.checkpoint, hidden=args.hidden, gnn_layers=args.gnn_layers,
+                public_hand_features=args.public_hand_features)
+        else:
+            _model_cache[args.checkpoint] = load_hier_model(
+                args.checkpoint, hidden=args.hidden,
+                public_hand_features=args.public_hand_features)
     return HierarchicalLearnedAgent(seat, model=_model_cache[args.checkpoint], deterministic=True,
                                      model_kind=args.model_type,
                                      public_hand_features=args.public_hand_features)
@@ -173,6 +178,7 @@ def main():
     parser.add_argument("--agent", type=str, default=None, choices=["random", "heuristic"],
                          help="evaluate a fixed agent instead of a checkpoint (baseline)")
     parser.add_argument("--model-type", choices=["hier", "gnn"], default="hier")
+    parser.add_argument("--gnn-layers", type=int, default=3, help="only used when --model-type gnn")
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--public-hand-features", action="store_true")
     parser.add_argument("--games", type=int, default=40)
