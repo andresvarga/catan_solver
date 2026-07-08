@@ -33,12 +33,13 @@ def load_dataset(path: str, device: str) -> dict[str, torch.Tensor]:
 def evaluate_bc(model: HierarchicalActorCritic, data: dict[str, torch.Tensor],
                  idx: np.ndarray, batch_size: int = 4096) -> dict[str, float]:
     model.eval()
+    model_device = next(model.parameters()).device
     total_logprob, total_correct_type, n = 0.0, 0, 0
     with torch.inference_mode():
         for start in range(0, len(idx), batch_size):
             mb = torch.as_tensor(idx[start:start + batch_size], dtype=torch.long, device=data["obs"].device)
-            obs_batch = data["obs"][mb]
-            tb = {k: v[mb] for k, v in data.items() if k != "obs"}
+            obs_batch = data["obs"][mb].to(model_device)
+            tb = {k: v[mb].to(model_device) for k, v in data.items() if k != "obs"}
             logprob, entropy, value = model.evaluate_actions(obs_batch, tb)
             total_logprob += float(logprob.sum())
             type_logits = model.type_head(model.features(obs_batch)).masked_fill(tb["type_mask"] == 0, -1e9)
@@ -60,16 +61,21 @@ def main():
     parser.add_argument("--val-frac", type=float, default=0.05)
     parser.add_argument("--public-hand-features", action="store_true")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--data-device", type=str, default=None, choices=[None, "cpu"],
+                         help="keep the dataset on CPU and move minibatches to the model "
+                              "device per step -- required once the dataset outgrows GPU "
+                              "memory (~2.7 KB/decision; a 2M-decision set is ~5.5 GB).")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
-    print(f"device: {device}")
+    data_device = args.data_device or device
+    print(f"device: {device} (dataset on {data_device})")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    data = load_dataset(args.dataset, device)
+    data = load_dataset(args.dataset, data_device)
     n = data["obs"].shape[0]
     perm = np.random.permutation(n)
     n_val = int(n * args.val_frac)
@@ -93,9 +99,10 @@ def main():
         np.random.shuffle(train_idx)
         losses = []
         for start in range(0, len(train_idx), args.batch_size):
-            mb = torch.as_tensor(train_idx[start:start + args.batch_size], dtype=torch.long, device=device)
-            obs_batch = data["obs"][mb]
-            tb = {k: v[mb] for k, v in data.items() if k != "obs"}
+            mb = torch.as_tensor(train_idx[start:start + args.batch_size], dtype=torch.long,
+                                  device=data_device)
+            obs_batch = data["obs"][mb].to(device)
+            tb = {k: v[mb].to(device) for k, v in data.items() if k != "obs"}
             logprob, entropy, value = model.evaluate_actions(obs_batch, tb)
             loss = -logprob.mean() - args.entropy_coef * entropy.mean()
 

@@ -70,9 +70,10 @@ def train_epochs(model, data: dict[str, torch.Tensor], device: str, epochs: int,
 
 
 def fixed_seed_eval(model, games_per_set: int, num_workers: int,
-                     public_hand_features: bool) -> tuple[float, float]:
+                     public_hand_features: bool,
+                     seed_bases: tuple[int, int] = (555_000, 777_000)) -> tuple[float, float]:
     wins = vp = 0.0
-    for base in (555_000, 777_000):
+    for base in seed_bases:
         res = evaluate_policy(model, "heuristic", games_per_set, seed_base=base,
                                model_kind="hier", num_workers=num_workers,
                                public_hand_features=public_hand_features)
@@ -100,7 +101,14 @@ def main():
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--public-hand-features", action="store_true")
     parser.add_argument("--eval-games", type=int, default=120,
-                         help="per fixed seed set (two sets: 555000, 777000)")
+                         help="per fixed seed set (two sets, see --eval-seed-bases)")
+    parser.add_argument("--eval-seed-bases", type=int, nargs=2, default=[555_000, 777_000],
+                         help="two eval seed bases. Use a range no prior experiment has "
+                              "selected against -- repeatedly comparing/selecting on the same "
+                              "seed sets overfits the leaderboard to them (observed: a "
+                              "checkpoint chosen as project-best on much-reused sets dropped "
+                              "8pp on genuinely fresh seeds). Reserve yet another untouched "
+                              "range for the final cross-experiment comparison.")
     parser.add_argument("--num-workers", type=int, default=12)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
@@ -121,7 +129,7 @@ def main():
     print(f"base dataset: {parts[0]['type_idx'].shape[0]} decisions")
 
     win0, vp0 = fixed_seed_eval(model, args.eval_games, args.num_workers,
-                                 args.public_hand_features)
+                                 args.public_hand_features, tuple(args.eval_seed_bases))
     print(f"round 0 (init): win_rate={win0:.1%} avg_vp={vp0:.2f}", flush=True)
     history = [(0, win0, vp0, parts[0]["type_idx"].shape[0])]
 
@@ -146,7 +154,7 @@ def main():
         torch.save({"model": model.state_dict(), "round": rnd},
                    os.path.join(args.out_dir, f"dagger_round{rnd}.pt"))
         win, vp = fixed_seed_eval(model, args.eval_games, args.num_workers,
-                                   args.public_hand_features)
+                                   args.public_hand_features, tuple(args.eval_seed_bases))
         history.append((rnd, win, vp, n))
         print(f"round {rnd}: win_rate={win:.1%} avg_vp={vp:.2f} "
               f"({time.time()-t0:.1f}s total)", flush=True)
