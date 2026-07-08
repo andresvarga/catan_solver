@@ -26,21 +26,26 @@ from agents.heuristic import HeuristicAgent
 from env.engine import CatanEngine, legal_actions
 from env.pettingzoo_env import build_observation
 from env.state import NUM_PLAYERS
+from training.graph_features import build_graph_observation
 from training.hier_model import (
     ACTION_TYPE_INDEX, HEAD_NAME_INDEX, NUM_ACTION_TYPES, SUBMASK_PAD, TYPE_TO_HEADS,
     _pad, action_to_indices, group_by_type, stage1_mask, stage2_mask,
 )
+from training.imitation_data import OBS_PREFIX
 from training.model import flatten_observation
 
 MAX_STEPS = 4000
 
 
-def encode_decision(state, actor: int, acts, chosen, public_hand_features: bool) -> dict:
+def encode_decision(state, actor: int, acts, chosen, public_hand_features: bool,
+                     model_type: str = "hier") -> dict:
     """Encode one (state, demonstrated action) pair into the head_data-shaped
     supervised target `evaluate_actions`/`prepare_transition_batch` consume.
     Shared by heuristic-self-play collection and DAgger collection (where the
     demonstrated action comes from the expert but the state came from the
-    learner's own rollout)."""
+    learner's own rollout). The label fields (everything but `obs`) don't
+    depend on which encoder `model_type` selects -- they come from the legal
+    actions and the demonstrated action, not the observation."""
     by_type = group_by_type(acts)
     actions_of_type = by_type[chosen.type]
     stage1_head, stage2_head = TYPE_TO_HEADS[chosen.type]
@@ -53,10 +58,14 @@ def encode_decision(state, actor: int, acts, chosen, public_hand_features: bool)
     mask2 = (_pad(stage2_mask(chosen.type, actions_of_type, idx1)) if stage2_head
              else np.zeros(SUBMASK_PAD, dtype=np.float32))
 
-    obs = build_observation(state, actor, acts, show_mask=True,
-                             public_hand_features=public_hand_features)
+    if model_type == "gnn":
+        obs = build_graph_observation(state, actor, public_hand_features=public_hand_features)
+    else:
+        obs_dict = build_observation(state, actor, acts, show_mask=True,
+                                      public_hand_features=public_hand_features)
+        obs = flatten_observation(obs_dict)
     return {
-        "obs": flatten_observation(obs),
+        "obs": obs,
         "type_mask": type_mask,
         "type_idx": ACTION_TYPE_INDEX[chosen.type],
         "head1_id": HEAD_NAME_INDEX[stage1_head] if stage1_head else -1,
@@ -68,9 +77,14 @@ def encode_decision(state, actor: int, acts, chosen, public_hand_features: bool)
     }
 
 
-def records_to_arrays(records: list[dict]) -> dict[str, np.ndarray]:
+def records_to_arrays(records: list[dict], model_type: str = "hier") -> dict[str, np.ndarray]:
+    if model_type == "gnn":
+        obs_arrays = {f"{OBS_PREFIX}{k}": np.stack([r["obs"][k] for r in records]).astype(np.float32)
+                      for k in records[0]["obs"]}
+    else:
+        obs_arrays = {"obs": np.stack([r["obs"] for r in records]).astype(np.float32)}
     return {
-        "obs": np.stack([r["obs"] for r in records]).astype(np.float32),
+        **obs_arrays,
         "type_mask": np.stack([r["type_mask"] for r in records]).astype(np.float32),
         "type_idx": np.array([r["type_idx"] for r in records], dtype=np.int64),
         "head1_id": np.array([r["head1_id"] for r in records], dtype=np.int64),
@@ -82,7 +96,7 @@ def records_to_arrays(records: list[dict]) -> dict[str, np.ndarray]:
     }
 
 
-def play_and_record(seed: int, public_hand_features: bool) -> list[dict]:
+def play_and_record(seed: int, public_hand_features: bool, model_type: str = "hier") -> list[dict]:
     engine = CatanEngine(randomize_board=True, seed=seed)
     agents = {i: HeuristicAgent(i, random.Random(seed * 97 + i)) for i in range(NUM_PLAYERS)}
     records = []
@@ -93,24 +107,26 @@ def play_and_record(seed: int, public_hand_features: bool) -> list[dict]:
         acts = legal_actions(state)
         chosen = agents[actor].choose(state, acts)
         if len(acts) > 1:
-            records.append(encode_decision(state, actor, acts, chosen, public_hand_features))
+            records.append(encode_decision(state, actor, acts, chosen, public_hand_features, model_type))
         engine.step(chosen)
         steps += 1
     return records
 
 
 _worker_phf = False
+_worker_model_type = "hier"
 
 
-def _init_worker(public_hand_features: bool) -> None:
-    global _worker_phf
+def _init_worker(public_hand_features: bool, model_type: str = "hier") -> None:
+    global _worker_phf, _worker_model_type
     _worker_phf = public_hand_features
+    _worker_model_type = model_type
 
 
 def _worker_collect(seeds: list[int]) -> list[dict]:
     out = []
     for seed in seeds:
-        out.extend(play_and_record(seed, _worker_phf))
+        out.extend(play_and_record(seed, _worker_phf, _worker_model_type))
     return out
 
 
@@ -120,20 +136,23 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=12)
     parser.add_argument("--public-hand-features", action="store_true")
+    parser.add_argument("--model-type", choices=["hier", "gnn"], default="hier",
+                         help="observation encoding to record: 'hier' (flat vector) or "
+                              "'gnn' (graph-encoded board, see training/graph_features.py)")
     parser.add_argument("--out", type=str, required=True)
     args = parser.parse_args()
 
     seeds = list(range(args.seed, args.seed + args.games))
     t0 = time.time()
     if args.num_workers <= 1:
-        _init_worker(args.public_hand_features)
+        _init_worker(args.public_hand_features, args.model_type)
         records = _worker_collect(seeds)
     else:
         nw = max(1, min(args.num_workers, args.games))
         chunks = [seeds[i::nw] for i in range(nw)]
         ctx = mp.get_context("fork")
         with ctx.Pool(processes=nw, initializer=_init_worker,
-                      initargs=(args.public_hand_features,)) as pool:
+                      initargs=(args.public_hand_features, args.model_type)) as pool:
             results = pool.map(_worker_collect, chunks)
         records = [r for chunk in results for r in chunk]
     elapsed = time.time() - t0
@@ -141,7 +160,7 @@ def main():
     n = len(records)
     print(f"{args.games} games -> {n} decisions in {elapsed:.1f}s ({n/elapsed:.0f} decisions/s)")
 
-    arrays = records_to_arrays(records)
+    arrays = records_to_arrays(records, args.model_type)
     np.savez(args.out, **arrays)
     size_mb = sum(a.nbytes for a in arrays.values()) / 1e6
     print(f"wrote {args.out} ({size_mb:.0f} MB)")

@@ -23,9 +23,8 @@ import numpy as np
 import torch
 
 from scripts.collect_dagger_demos import collect_dagger
-from training.hier_model import HierarchicalActorCritic
-from training.model import observation_dim
-from training.train_hier import evaluate_policy
+from training.imitation_data import batch_labels, batch_obs
+from training.train_hier import build_model, evaluate_policy
 
 
 def load_arrays(path: str) -> dict[str, np.ndarray]:
@@ -55,8 +54,8 @@ def train_epochs(model, data: dict[str, torch.Tensor], device: str, epochs: int,
         losses = []
         for start in range(0, n, batch_size):
             mb = torch.as_tensor(order[start:start + batch_size], dtype=torch.long)
-            obs = data["obs"][mb].to(device, non_blocking=True)
-            tb = {k: v[mb].to(device, non_blocking=True) for k, v in data.items() if k != "obs"}
+            obs = batch_obs(data, mb, device)
+            tb = batch_labels(data, mb, device)
             logprob, entropy, _ = model.evaluate_actions(obs, tb)
             loss = -logprob.mean() - entropy_coef * entropy.mean()
             optimizer.zero_grad()
@@ -71,11 +70,12 @@ def train_epochs(model, data: dict[str, torch.Tensor], device: str, epochs: int,
 
 def fixed_seed_eval(model, games_per_set: int, num_workers: int,
                      public_hand_features: bool,
-                     seed_bases: tuple[int, int] = (555_000, 777_000)) -> tuple[float, float]:
+                     seed_bases: tuple[int, int] = (555_000, 777_000),
+                     model_type: str = "hier") -> tuple[float, float]:
     wins = vp = 0.0
     for base in seed_bases:
         res = evaluate_policy(model, "heuristic", games_per_set, seed_base=base,
-                               model_kind="hier", num_workers=num_workers,
+                               model_kind=model_type, num_workers=num_workers,
                                public_hand_features=public_hand_features)
         wins += res["win_rate"] * games_per_set
         vp += res["avg_vp"] * games_per_set
@@ -98,7 +98,9 @@ def main():
     parser.add_argument("--lr", type=float, default=5e-4,
                          help="lower than fresh-BC's 1e-3: every round warm-starts")
     parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--model-type", choices=["hier", "gnn"], default="hier")
     parser.add_argument("--hidden", type=int, default=256)
+    parser.add_argument("--gnn-layers", type=int, default=3, help="only used when --model-type gnn")
     parser.add_argument("--public-hand-features", action="store_true")
     parser.add_argument("--eval-games", type=int, default=120,
                          help="per fixed seed set (two sets, see --eval-seed-bases)")
@@ -118,18 +120,20 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    obs_dim = observation_dim(public_hand_features=args.public_hand_features)
-    model = HierarchicalActorCritic(obs_dim=obs_dim, hidden=args.hidden)
+    model = build_model(args.model_type, args.hidden, args.gnn_layers,
+                         public_hand_features=args.public_hand_features)
     ckpt = torch.load(args.init_checkpoint, map_location="cpu")
     model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt)
     model.eval()
 
-    print(f"device={device}  rounds={args.rounds}  games/round={args.games_per_round}")
+    print(f"device={device}  model_type={args.model_type}  rounds={args.rounds}  "
+          f"games/round={args.games_per_round}")
     parts = [load_arrays(args.base_dataset)]
     print(f"base dataset: {parts[0]['type_idx'].shape[0]} decisions")
 
     win0, vp0 = fixed_seed_eval(model, args.eval_games, args.num_workers,
-                                 args.public_hand_features, tuple(args.eval_seed_bases))
+                                 args.public_hand_features, tuple(args.eval_seed_bases),
+                                 args.model_type)
     print(f"round 0 (init): win_rate={win0:.1%} avg_vp={vp0:.2f}", flush=True)
     history = [(0, win0, vp0, parts[0]["type_idx"].shape[0])]
 
@@ -138,7 +142,7 @@ def main():
         base_seed = args.seed + 1_000_000 + rnd * 10_000
         new = collect_dagger(model, args.games_per_round, base_seed,
                               args.public_hand_features, num_workers=args.num_workers,
-                              expert_prob=args.expert_prob)
+                              expert_prob=args.expert_prob, model_type=args.model_type)
         np.savez(os.path.join(args.out_dir, f"dagger_round{rnd}.npz"), **new)
         parts.append(new)
         agg = concat_arrays(parts)
@@ -154,7 +158,8 @@ def main():
         torch.save({"model": model.state_dict(), "round": rnd},
                    os.path.join(args.out_dir, f"dagger_round{rnd}.pt"))
         win, vp = fixed_seed_eval(model, args.eval_games, args.num_workers,
-                                   args.public_hand_features, tuple(args.eval_seed_bases))
+                                   args.public_hand_features, tuple(args.eval_seed_bases),
+                                   args.model_type)
         history.append((rnd, win, vp, n))
         print(f"round {rnd}: win_rate={win:.1%} avg_vp={vp:.2f} "
               f"({time.time()-t0:.1f}s total)", flush=True)

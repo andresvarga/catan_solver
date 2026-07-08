@@ -1,17 +1,17 @@
-"""Behavior-cloning pretraining CLI: warm-start `HierarchicalActorCritic` on
-heuristic-vs-heuristic demonstrations (scripts/collect_heuristic_demos.py)
-before handing it to league_train's PPO loop.
+"""Behavior-cloning pretraining CLI: warm-start a policy (flat `hier` trunk or
+graph-encoded `gnn` trunk) on heuristic-vs-heuristic demonstrations
+(scripts/collect_heuristic_demos.py) before handing it to league_train's PPO
+loop.
 
 BC loss is exactly the negative log-likelihood of the demonstrated action
-under the current policy -- which is precisely what
-`HierarchicalActorCritic.evaluate_actions` already computes as its `logprob`
-return (type head + whichever sub-heads were active), since a demonstration
-and a self-generated rollout transition share the same head_data shape. So
-this reuses `evaluate_actions` directly rather than reimplementing per-head
-cross-entropy: `loss = -mean(logprob) - entropy_coef * mean(entropy)`, with a
-small entropy bonus purely to keep the policy from collapsing to
-deterministic point masses it can't recover from during the RL fine-tune
-that follows.
+under the current policy -- which is precisely what `evaluate_actions`
+already computes as its `logprob` return (type head + whichever sub-heads
+were active), since a demonstration and a self-generated rollout transition
+share the same head_data shape. So this reuses `evaluate_actions` directly
+rather than reimplementing per-head cross-entropy:
+`loss = -mean(logprob) - entropy_coef * mean(entropy)`, with a small entropy
+bonus purely to keep the policy from collapsing to deterministic point masses
+it can't recover from during the RL fine-tune that follows.
 """
 from __future__ import annotations
 
@@ -21,28 +21,26 @@ import time
 import numpy as np
 import torch
 
-from training.hier_model import HierarchicalActorCritic
+from training.imitation_data import batch_labels, batch_obs, is_graph_dataset, load_dataset, model_features
 from training.model import observation_dim
+from training.train_hier import build_model
 
 
-def load_dataset(path: str, device: str) -> dict[str, torch.Tensor]:
-    npz = np.load(path)
-    return {k: torch.as_tensor(npz[k], device=device) for k in npz.files}
-
-
-def evaluate_bc(model: HierarchicalActorCritic, data: dict[str, torch.Tensor],
-                 idx: np.ndarray, batch_size: int = 4096) -> dict[str, float]:
+def evaluate_bc(model, data: dict[str, torch.Tensor], idx: np.ndarray,
+                 batch_size: int = 4096) -> dict[str, float]:
     model.eval()
-    model_device = next(model.parameters()).device
+    device = next(model.parameters()).device
+    data_device = data["type_idx"].device
     total_logprob, total_correct_type, n = 0.0, 0, 0
     with torch.inference_mode():
         for start in range(0, len(idx), batch_size):
-            mb = torch.as_tensor(idx[start:start + batch_size], dtype=torch.long, device=data["obs"].device)
-            obs_batch = data["obs"][mb].to(model_device)
-            tb = {k: v[mb].to(model_device) for k, v in data.items() if k != "obs"}
+            mb = torch.as_tensor(idx[start:start + batch_size], dtype=torch.long, device=data_device)
+            obs_batch = batch_obs(data, mb, device)
+            tb = batch_labels(data, mb, device)
             logprob, entropy, value = model.evaluate_actions(obs_batch, tb)
             total_logprob += float(logprob.sum())
-            type_logits = model.type_head(model.features(obs_batch)).masked_fill(tb["type_mask"] == 0, -1e9)
+            type_logits = model.type_head(model_features(model, obs_batch)).masked_fill(
+                tb["type_mask"] == 0, -1e9)
             total_correct_type += int((type_logits.argmax(-1) == tb["type_idx"]).sum())
             n += len(mb)
     model.train()
@@ -53,7 +51,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--out", type=str, required=True)
+    parser.add_argument("--model-type", choices=["hier", "gnn"], default="hier")
     parser.add_argument("--hidden", type=int, default=256)
+    parser.add_argument("--gnn-layers", type=int, default=3, help="only used when --model-type gnn")
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -76,18 +76,23 @@ def main():
     np.random.seed(args.seed)
 
     data = load_dataset(args.dataset, data_device)
-    n = data["obs"].shape[0]
+    assert is_graph_dataset(data) == (args.model_type == "gnn"), (
+        f"dataset encoding ({'gnn' if is_graph_dataset(data) else 'hier'}) doesn't match "
+        f"--model-type {args.model_type} -- collect the dataset with a matching --model-type.")
+    n = data["type_idx"].shape[0]
     perm = np.random.permutation(n)
     n_val = int(n * args.val_frac)
     val_idx, train_idx = perm[:n_val], perm[n_val:]
     print(f"loaded {n} demonstrations ({len(train_idx)} train / {len(val_idx)} val)")
 
-    obs_dim = observation_dim(public_hand_features=args.public_hand_features)
-    assert data["obs"].shape[1] == obs_dim, (
-        f"dataset obs width {data['obs'].shape[1]} != expected {obs_dim} for "
-        f"public_hand_features={args.public_hand_features} -- collect the dataset with "
-        f"a matching --public-hand-features setting.")
-    model = HierarchicalActorCritic(obs_dim=obs_dim, hidden=args.hidden).to(device)
+    if args.model_type == "hier":
+        obs_dim = observation_dim(public_hand_features=args.public_hand_features)
+        assert data["obs"].shape[1] == obs_dim, (
+            f"dataset obs width {data['obs'].shape[1]} != expected {obs_dim} for "
+            f"public_hand_features={args.public_hand_features} -- collect the dataset with "
+            f"a matching --public-hand-features setting.")
+    model = build_model(args.model_type, args.hidden, args.gnn_layers,
+                         public_hand_features=args.public_hand_features).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     val0 = evaluate_bc(model, data, val_idx)
@@ -101,8 +106,8 @@ def main():
         for start in range(0, len(train_idx), args.batch_size):
             mb = torch.as_tensor(train_idx[start:start + args.batch_size], dtype=torch.long,
                                   device=data_device)
-            obs_batch = data["obs"][mb].to(device)
-            tb = {k: v[mb].to(device) for k, v in data.items() if k != "obs"}
+            obs_batch = batch_obs(data, mb, device)
+            tb = batch_labels(data, mb, device)
             logprob, entropy, value = model.evaluate_actions(obs_batch, tb)
             loss = -logprob.mean() - args.entropy_coef * entropy.mean()
 
@@ -118,8 +123,8 @@ def main():
               f"{time.time()-t0:.1f}s")
 
     model.to("cpu")
-    torch.save({"model": model.state_dict(), "bc_dataset": args.dataset, "bc_epochs": args.epochs},
-               args.out)
+    torch.save({"model": model.state_dict(), "bc_dataset": args.dataset, "bc_epochs": args.epochs,
+                "model_type": args.model_type}, args.out)
     print(f"saved {args.out}")
 
 
