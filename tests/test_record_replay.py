@@ -4,6 +4,7 @@ import os
 
 from env.engine import CatanEngine
 from scripts.record_replay import board_geometry, record_game, write_replay
+from training.gnn_model import GraphActorCritic
 from training.hier_model import HierarchicalActorCritic
 from training.model import observation_dim
 
@@ -60,3 +61,21 @@ def test_record_game_produces_valid_replay_and_html():
     assert '"frames"' in html and "const R =" in html
     assert "<!--ARTIFACT_START-->" in html and "<!--ARTIFACT_END-->" in html
     os.remove(out)
+
+
+def test_record_game_works_with_the_gnn_encoder():
+    """The recorder's diagnostics (trunk forward, stage-1 pointer logits) take
+    a different path per encoder (per-head linear layers vs. embedding-dot
+    pointer heads) -- regression coverage for that branch, not just hier."""
+    model = GraphActorCritic(hidden=32, gnn_layers=2)
+    model.eval()
+    replay = record_game(model, seat=0, seed=3, opponents="random",
+                          public_hand_features=False, max_steps=200,
+                          checkpoint_label="test-gnn", model_type="gnn")
+    json.dumps(replay)  # still serializable
+    diags = [f["d"] for f in replay["frames"] if f["d"] is not None]
+    assert diags, "expected at least one instrumented model decision"
+    for d in diags:
+        assert 0.0 <= d["im"] <= 1.0 + 1e-6
+        assert 0.0 <= d["cp"] <= 1.0 + 1e-6
+        assert d["top"] and all(len(t) == 2 for t in d["top"])

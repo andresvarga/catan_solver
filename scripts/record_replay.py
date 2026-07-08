@@ -37,6 +37,7 @@ from env.board import HexType, Resource, _hex_corners
 from env.engine import CatanEngine, legal_actions, total_vp
 from env.pettingzoo_env import build_observation
 from env.state import DevCard, NUM_PLAYERS
+from training.graph_features import build_graph_observation
 from training.hier_model import (
     ACTION_TYPES, ACTION_TYPE_INDEX, NEG_INF, TYPE_TO_HEADS, group_by_type, stage1_mask,
 )
@@ -178,13 +179,31 @@ def snapshot_state(state) -> dict:
 
 # -- model diagnostics -----------------------------------------------------------
 
-def model_diagnostics(model, state, seat: int, acts: list[Action], chosen: Action,
-                       public_hand_features: bool) -> dict:
-    obs = build_observation(state, seat, acts, show_mask=True,
+def _encode_for_diagnostics(state, actor: int, acts: list[Action], public_hand_features: bool,
+                             model_type: str):
+    """Returns (obs_batch, encode_fn) where encode_fn(model) -> (type_logits, value,
+    stage1_logits_fn). Isolates the only two encoder-specific things
+    `model_diagnostics` needs: how the observation is batched, and how a
+    stage-1 head's logits are fetched (a flat dict lookup for the hier
+    trunk's per-head linear layers vs. a shared pointer-logit method for the
+    GNN trunk, which scores against node embeddings instead)."""
+    if model_type == "gnn":
+        obs = build_graph_observation(state, actor, public_hand_features=public_hand_features)
+        return {k: torch.tensor(v, dtype=torch.float32).unsqueeze(0) for k, v in obs.items()}
+    obs = build_observation(state, actor, acts, show_mask=True,
                              public_hand_features=public_hand_features)
-    flat = torch.tensor(flatten_observation(obs), dtype=torch.float32).unsqueeze(0)
+    return torch.tensor(flatten_observation(obs), dtype=torch.float32).unsqueeze(0)
+
+
+def model_diagnostics(model, state, seat: int, acts: list[Action], chosen: Action,
+                       public_hand_features: bool, model_type: str = "hier") -> dict:
+    obs_batch = _encode_for_diagnostics(state, seat, acts, public_hand_features, model_type)
     with torch.inference_mode():
-        feats = model.features(flat)
+        if model_type == "gnn":
+            feats, hex_emb, vertex_emb, edge_emb, opp_emb = model.encode(obs_batch)
+            self_id = obs_batch["self_id"]
+        else:
+            feats = model.features(obs_batch)
         value = float(model.value_head(feats).squeeze())
         type_logits = model.type_head(feats).squeeze(0)
 
@@ -213,7 +232,11 @@ def model_diagnostics(model, state, seat: int, acts: list[Action], chosen: Actio
         head_name, _ = TYPE_TO_HEADS[chosen.type]
         if head_name is not None:
             mask1 = stage1_mask(chosen.type, by_type[chosen.type])
-            logits1 = model._head_modules[head_name](feats).squeeze(0)[: len(mask1)]
+            if model_type == "gnn":
+                logits1 = model._head_logits(head_name, feats, hex_emb, vertex_emb, edge_emb,
+                                              opp_emb, self_id).squeeze(0)[: len(mask1)]
+            else:
+                logits1 = model._head_modules[head_name](feats).squeeze(0)[: len(mask1)]
             probs1 = torch.softmax(logits1, dim=-1)
             illegal_mass_s1 = float(sum(float(probs1[i]) for i in range(len(mask1))
                                          if mask1[i] == 0))
@@ -232,7 +255,7 @@ def model_diagnostics(model, state, seat: int, acts: list[Action], chosen: Actio
 
 def record_game(model, seat: int, seed: int, opponents: str,
                  public_hand_features: bool, max_steps: int = MAX_STEPS,
-                 checkpoint_label: str = "") -> dict:
+                 checkpoint_label: str = "", model_type: str = "hier") -> dict:
     from training.agent import HierarchicalLearnedAgent
 
     engine = CatanEngine(randomize_board=True, seed=seed)
@@ -240,6 +263,7 @@ def record_game(model, seat: int, seed: int, opponents: str,
     agents = {pid: opp_cls(pid, random.Random(seed * 97 + pid))
               for pid in range(NUM_PLAYERS) if pid != seat}
     agents[seat] = HierarchicalLearnedAgent(seat, model=model, deterministic=True,
+                                             model_kind=model_type,
                                              public_hand_features=public_hand_features)
 
     frames = [{"a": None, "ph": engine.state.phase.name, "act": None, "at": None,
@@ -254,7 +278,8 @@ def record_game(model, seat: int, seed: int, opponents: str,
 
         diag = None
         if actor == seat and len(acts) > 1:
-            diag = model_diagnostics(model, state, seat, acts, chosen, public_hand_features)
+            diag = model_diagnostics(model, state, seat, acts, chosen, public_hand_features,
+                                      model_type)
 
         engine.step(chosen)
         steps += 1
@@ -300,7 +325,9 @@ def write_replay(replay: dict, out_path: str) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--model-type", choices=["hier", "gnn"], default="hier")
     parser.add_argument("--hidden", type=int, default=256)
+    parser.add_argument("--gnn-layers", type=int, default=3, help="only used when --model-type gnn")
     parser.add_argument("--public-hand-features", action="store_true")
     parser.add_argument("--seat", type=int, default=0)
     parser.add_argument("--opponents", choices=["heuristic", "random"], default="heuristic")
@@ -309,13 +336,18 @@ def main():
     parser.add_argument("--out", type=str, default="replay.html")
     args = parser.parse_args()
 
-    from training.agent import load_hier_model
-    model = load_hier_model(args.checkpoint, hidden=args.hidden,
-                             public_hand_features=args.public_hand_features)
+    from training.agent import load_gnn_model, load_hier_model
+    if args.model_type == "gnn":
+        model = load_gnn_model(args.checkpoint, hidden=args.hidden, gnn_layers=args.gnn_layers,
+                                public_hand_features=args.public_hand_features)
+    else:
+        model = load_hier_model(args.checkpoint, hidden=args.hidden,
+                                 public_hand_features=args.public_hand_features)
 
     replay = record_game(model, args.seat, args.seed, args.opponents,
                           args.public_hand_features, max_steps=args.max_steps,
-                          checkpoint_label=os.path.basename(args.checkpoint))
+                          checkpoint_label=os.path.basename(args.checkpoint),
+                          model_type=args.model_type)
     write_replay(replay, args.out)
 
     r = replay["meta"]["result"]
