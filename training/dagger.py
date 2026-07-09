@@ -41,30 +41,37 @@ def to_cpu_tensors(arrays: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
 
 
 def train_epochs(model, data: dict[str, torch.Tensor], device: str, epochs: int,
-                  batch_size: int, lr: float, entropy_coef: float, seed: int) -> None:
+                  batch_size: int, lr: float, entropy_coef: float, seed: int,
+                  vertex_aux_coef: float = 0.1) -> None:
     """BC training loop (same objective as training/bc_pretrain.py) over
     CPU-resident data, minibatches moved to `device` per step."""
     model.to(device).train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     n = data["type_idx"].shape[0]
     rng = np.random.RandomState(seed)
+    has_aux = hasattr(model, "vertex_aux_loss") and vertex_aux_coef > 0
     for epoch in range(1, epochs + 1):
         t0 = time.time()
         order = rng.permutation(n)
-        losses = []
+        losses, aux_losses = [], []
         for start in range(0, n, batch_size):
             mb = torch.as_tensor(order[start:start + batch_size], dtype=torch.long)
             obs = batch_obs(data, mb, device)
             tb = batch_labels(data, mb, device)
             logprob, entropy, _ = model.evaluate_actions(obs, tb)
             loss = -logprob.mean() - entropy_coef * entropy.mean()
+            if has_aux:
+                aux = model.vertex_aux_loss(obs)
+                loss = loss + vertex_aux_coef * aux
+                aux_losses.append(aux.item())
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
             losses.append(loss.item())
-        print(f"    epoch {epoch:2d}/{epochs} loss={np.mean(losses):.4f} ({time.time()-t0:.1f}s)",
-              flush=True)
+        aux_str = f" vertex_aux={np.mean(aux_losses):.4f}" if aux_losses else ""
+        print(f"    epoch {epoch:2d}/{epochs} loss={np.mean(losses):.4f}{aux_str} "
+              f"({time.time()-t0:.1f}s)", flush=True)
     model.to("cpu").eval()
 
 
@@ -98,6 +105,9 @@ def main():
     parser.add_argument("--lr", type=float, default=5e-4,
                          help="lower than fresh-BC's 1e-3: every round warm-starts")
     parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--vertex-aux-coef", type=float, default=0.1,
+                         help="GNN only: weight on the vertex-production-value auxiliary "
+                              "regression loss, see GraphActorCritic.vertex_aux_loss. 0 disables.")
     parser.add_argument("--model-type", choices=["hier", "gnn"], default="hier")
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--gnn-layers", type=int, default=3, help="only used when --model-type gnn")
@@ -152,7 +162,8 @@ def main():
 
         data = to_cpu_tensors(agg)
         train_epochs(model, data, device, args.epochs, args.batch_size, args.lr,
-                      args.entropy_coef, seed=args.seed + rnd)
+                      args.entropy_coef, seed=args.seed + rnd,
+                      vertex_aux_coef=args.vertex_aux_coef)
         del data
 
         torch.save({"model": model.state_dict(), "round": rnd},

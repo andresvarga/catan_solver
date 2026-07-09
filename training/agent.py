@@ -119,6 +119,13 @@ def load_gnn_model(checkpoint_path: str, hidden: int = 128, gnn_layers: int = 3,
     model = GraphActorCritic(hidden=hidden, gnn_layers=gnn_layers,
                               public_hand_features=public_hand_features)
     state_dict = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(state_dict["model"] if "model" in state_dict else state_dict)
+    # strict=False tolerates checkpoints saved before vertex_aux_head existed
+    # (it's a training-only probe, unused by act()/choose()) -- but any other
+    # missing/unexpected key means a real architecture mismatch, so surface it.
+    result = model.load_state_dict(state_dict["model"] if "model" in state_dict else state_dict,
+                                    strict=False)
+    unexpected_missing = [k for k in result.missing_keys if not k.startswith("vertex_aux_head")]
+    assert not unexpected_missing and not result.unexpected_keys, (
+        f"missing={unexpected_missing} unexpected={result.unexpected_keys}")
     model.eval()
     return model

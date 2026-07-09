@@ -70,3 +70,50 @@ def test_dagger_gnn_collection_and_aggregation():
 def test_build_model_gnn_matches_dataset_encoding():
     model = build_model("gnn", hidden=32, gnn_layers=2, public_hand_features=False)
     assert isinstance(model, GraphActorCritic)
+
+
+def test_vertex_aux_loss_is_finite_and_trainable():
+    """The auxiliary vertex-production-value objective (see gnn_model.py's
+    GraphActorCritic.vertex_aux_loss) must be usable as a plain extra loss
+    term: correct shape, finite, and backprop-able into the shared trunk."""
+    records = play_and_record(seed=6, public_hand_features=False, model_type="gnn")
+    arrays = records_to_arrays(records, model_type="gnn")
+    data = {k: torch.as_tensor(v) for k, v in arrays.items()}
+    idx = torch.arange(min(64, len(records)))
+    model = _gnn_model()
+    obs_batch = batch_obs(data, idx, "cpu")
+
+    loss = model.vertex_aux_loss(obs_batch)
+    assert loss.dim() == 0
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert model.vertex_aux_head.weight.grad is not None
+    assert model.hex_embed.weight.grad is not None  # gradient reaches the trunk
+
+
+def test_vertex_target_production_matches_hand_computed_pip_sum():
+    """A vertex touching exactly one hex with pips=5 (a 6 or 8) and no other
+    neighbors with a number should have target 5/15; verifies the aggregation
+    direction (hex -> vertex) and normalization, not just that it runs."""
+    from training.board_topology import HEX_TO_VERTEX
+
+    model = _gnn_model()
+    hex_batch = torch.zeros(1, 19, 9)
+    hex_batch[0, :, 7] = 0.0  # every hex pips=0 except hex 0
+    hex_batch[0, 0, 7] = 5.0 / 5.0  # pip count 5, stored /5-normalized
+    target = model.vertex_target_production(hex_batch)
+    touched = [v for h, v in zip(*HEX_TO_VERTEX) if h == 0]
+    assert len(touched) == 6  # every hex touches 6 vertices
+    for v in touched:
+        assert abs(target[0, v].item() - 5.0 / 15.0) < 1e-6
+    untouched = [v for v in range(target.shape[1]) if v not in touched]
+    assert all(target[0, v].item() == 0.0 for v in untouched)
+
+
+def test_hier_model_has_no_vertex_aux_loss():
+    """bc_pretrain.py / dagger.py gate the auxiliary term on hasattr(...) --
+    guard that the flat model doesn't accidentally grow one and silently
+    change behavior, and that the gate works as intended."""
+    from training.hier_model import HierarchicalActorCritic
+    model = HierarchicalActorCritic(obs_dim=10, hidden=16)
+    assert not hasattr(model, "vertex_aux_loss")

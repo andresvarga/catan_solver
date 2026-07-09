@@ -58,6 +58,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--vertex-aux-coef", type=float, default=0.1,
+                         help="GNN only (auto-skipped for --model-type hier): weight on the "
+                              "vertex-production-value auxiliary regression loss, see "
+                              "GraphActorCritic.vertex_aux_loss. 0 disables it.")
     parser.add_argument("--val-frac", type=float, default=0.05)
     parser.add_argument("--public-hand-features", action="store_true")
     parser.add_argument("--device", type=str, default="auto")
@@ -102,7 +106,7 @@ def main():
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         np.random.shuffle(train_idx)
-        losses = []
+        losses, aux_losses = [], []
         for start in range(0, len(train_idx), args.batch_size):
             mb = torch.as_tensor(train_idx[start:start + args.batch_size], dtype=torch.long,
                                   device=data_device)
@@ -110,6 +114,10 @@ def main():
             tb = batch_labels(data, mb, device)
             logprob, entropy, value = model.evaluate_actions(obs_batch, tb)
             loss = -logprob.mean() - args.entropy_coef * entropy.mean()
+            if hasattr(model, "vertex_aux_loss") and args.vertex_aux_coef > 0:
+                aux = model.vertex_aux_loss(obs_batch)
+                loss = loss + args.vertex_aux_coef * aux
+                aux_losses.append(aux.item())
 
             optimizer.zero_grad()
             loss.backward()
@@ -118,7 +126,8 @@ def main():
             losses.append(loss.item())
 
         val = evaluate_bc(model, data, val_idx)
-        print(f"epoch {epoch:2d} | train_loss={np.mean(losses):.4f} | "
+        aux_str = f" vertex_aux={np.mean(aux_losses):.4f} |" if aux_losses else ""
+        print(f"epoch {epoch:2d} | train_loss={np.mean(losses):.4f} |{aux_str} "
               f"val_logprob={val['mean_logprob']:.3f} val_type_acc={val['type_accuracy']:.3f} | "
               f"{time.time()-t0:.1f}s")
 

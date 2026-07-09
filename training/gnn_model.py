@@ -163,6 +163,14 @@ class GraphActorCritic(nn.Module):
         self.discard_index_head = nn.Linear(hidden, 100)
         self.value_head = nn.Linear(hidden, 1)
 
+        # Auxiliary head (not used for acting or evaluate_actions -- see
+        # vertex_aux_loss). Encourages vertex embeddings to encode a pure
+        # board-geometry fact (production value if settled here) that the
+        # edge/vertex pointer heads currently have to reconstruct from reward
+        # alone, several message-passing hops away from the hexes that
+        # actually determine it.
+        self.vertex_aux_head = nn.Linear(hidden, 1)
+
     def encode(self, batch: dict[str, torch.Tensor]):
         hex_emb = self.hex_embed(batch["hex"])
         vertex_emb = self.vertex_embed(batch["vertex"])
@@ -227,6 +235,33 @@ class GraphActorCritic(nn.Module):
         if head_name == "discard_index":
             return self.discard_index_head(features)
         raise ValueError(f"unhandled head {head_name}")
+
+    def vertex_target_production(self, hex_batch: torch.Tensor) -> torch.Tensor:
+        """Ground-truth auxiliary regression target for `vertex_aux_loss`:
+        total pip count of the hexes touching each vertex, i.e. the dominant
+        term of `agents.heuristic.vertex_production_value` (which also adds
+        small resource-diversity/port bonuses this proxy skips). A pure
+        board-geometry fact -- derivable from the `hex` features already in
+        every observation, so no demo-collection changes were needed to add
+        this signal."""
+        pips = hex_batch[..., 7] * 5.0  # undo the /5 scaling in graph_features.py
+        batch = pips.shape[0]
+        agg = torch.zeros(batch, NUM_VERTICES, device=pips.device, dtype=pips.dtype)
+        messages = pips[:, self.topo.hex_to_vertex_src]
+        agg.index_add_(1, self.topo.hex_to_vertex_dst, messages)
+        return agg / 15.0  # normalize (max = 3 hexes * pip 5)
+
+    def vertex_aux_loss(self, obs_batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """MSE between the vertex_aux_head's per-vertex prediction and the
+        board's actual production value at that vertex. Purely a
+        representation-shaping term -- it never touches the policy or value
+        heads directly, so it can only help by making "is this vertex worth
+        building toward" a legible feature of the vertex embedding, not by
+        telling the policy what to prefer."""
+        _, _, vertex_emb, _, _ = self.encode(obs_batch)
+        pred = self.vertex_aux_head(vertex_emb).squeeze(-1)
+        target = self.vertex_target_production(obs_batch["hex"])
+        return torch.nn.functional.mse_loss(pred, target)
 
     def value(self, obs_batch: dict[str, torch.Tensor]) -> torch.Tensor:
         """Value-only forward pass (no action sampling). Not used by the
