@@ -37,9 +37,22 @@ from env.state import NUM_PLAYERS
 from scripts.collect_heuristic_demos import MAX_STEPS, encode_decision, records_to_arrays
 
 
+def make_labeler(kind: str, seat: int, rng: random.Random,
+                  resource_weights: dict | None):
+    """The expert whose choices become the imitation targets. 'search' is the
+    1-ply lookahead agent (agents/search_heuristic.py, ~50% win rate vs 3
+    plain heuristics -- roughly double the static heuristic's strength)."""
+    if kind == "search":
+        from agents.search_heuristic import SearchHeuristicAgent
+        return SearchHeuristicAgent(seat, rng) if resource_weights is None else \
+            SearchHeuristicAgent(seat, rng, resource_weights=resource_weights)
+    return HeuristicAgent(seat, rng, resource_weights=resource_weights)
+
+
 def play_and_record_dagger(seed: int, public_hand_features: bool, model,
                             expert_prob: float = 0.0, model_type: str = "hier",
-                            resource_weights: dict | None = None) -> list[dict]:
+                            resource_weights: dict | None = None,
+                            labeler_kind: str = "heuristic") -> list[dict]:
     from training.agent import HierarchicalLearnedAgent
 
     torch.manual_seed(seed)  # policy sampling reproducible per game
@@ -59,8 +72,8 @@ def play_and_record_dagger(seed: int, public_hand_features: bool, model,
     # A dedicated expert instance for labeling: HeuristicAgent keeps small
     # per-turn internal state, so the labeler must not be one of the playing
     # opponents (whose seats/perspectives differ anyway).
-    labeler = HeuristicAgent(policy_seat, random.Random(seed * 173 + 11),
-                              resource_weights=resource_weights)
+    labeler = make_labeler(labeler_kind, policy_seat, random.Random(seed * 173 + 11),
+                            resource_weights)
 
     records = []
     steps = 0
@@ -89,32 +102,36 @@ _w_phf = False
 _w_expert_prob = 0.0
 _w_model_type = "hier"
 _w_resource_weights = None
+_w_labeler_kind = "heuristic"
 
 
 def _init_worker(model, phf: bool, expert_prob: float, model_type: str = "hier",
-                  resource_weights: dict | None = None) -> None:
-    global _w_model, _w_phf, _w_expert_prob, _w_model_type, _w_resource_weights
+                  resource_weights: dict | None = None,
+                  labeler_kind: str = "heuristic") -> None:
+    global _w_model, _w_phf, _w_expert_prob, _w_model_type, _w_resource_weights, _w_labeler_kind
     torch.set_num_threads(1)
     model.eval()
     _w_model, _w_phf, _w_expert_prob, _w_model_type = model, phf, expert_prob, model_type
     _w_resource_weights = resource_weights
+    _w_labeler_kind = labeler_kind
 
 
 def _worker_collect(seeds: list[int]) -> list[dict]:
     out = []
     for seed in seeds:
         out.extend(play_and_record_dagger(seed, _w_phf, _w_model, _w_expert_prob, _w_model_type,
-                                           _w_resource_weights))
+                                           _w_resource_weights, _w_labeler_kind))
     return out
 
 
 def collect_dagger(model, games: int, base_seed: int, public_hand_features: bool,
                     num_workers: int = 12, expert_prob: float = 0.0,
-                    model_type: str = "hier", resource_weights: dict | None = None
-                    ) -> dict[str, np.ndarray]:
+                    model_type: str = "hier", resource_weights: dict | None = None,
+                    labeler_kind: str = "heuristic") -> dict[str, np.ndarray]:
     seeds = list(range(base_seed, base_seed + games))
     if num_workers <= 1:
-        _init_worker(model, public_hand_features, expert_prob, model_type, resource_weights)
+        _init_worker(model, public_hand_features, expert_prob, model_type, resource_weights,
+                      labeler_kind)
         records = _worker_collect(seeds)
     else:
         nw = max(1, min(num_workers, games))
@@ -122,7 +139,7 @@ def collect_dagger(model, games: int, base_seed: int, public_hand_features: bool
         ctx = mp.get_context("fork")
         with ctx.Pool(processes=nw, initializer=_init_worker,
                       initargs=(model, public_hand_features, expert_prob, model_type,
-                                resource_weights)) as pool:
+                                resource_weights, labeler_kind)) as pool:
             records = [r for chunk in pool.map(_worker_collect, chunks) for r in chunk]
     return records_to_arrays(records, model_type)
 
@@ -140,6 +157,8 @@ def main():
     parser.add_argument("--ore-weight", type=float, default=1.0,
                          help="resource_weights={ORE: this} for the labeler only (see "
                               "agents/heuristic.py) -- opponent seats stay unweighted.")
+    parser.add_argument("--labeler", choices=["heuristic", "search"], default="heuristic",
+                         help="'search' = 1-ply lookahead expert (agents/search_heuristic.py)")
     parser.add_argument("--num-workers", type=int, default=12)
     parser.add_argument("--out", type=str, required=True)
     args = parser.parse_args()
@@ -157,7 +176,8 @@ def main():
     t0 = time.time()
     arrays = collect_dagger(model, args.games, args.seed, args.public_hand_features,
                              num_workers=args.num_workers, expert_prob=args.expert_prob,
-                             model_type=args.model_type, resource_weights=resource_weights)
+                             model_type=args.model_type, resource_weights=resource_weights,
+                             labeler_kind=args.labeler)
     n = arrays["type_idx"].shape[0]
     print(f"{args.games} learner-rollout games -> {n} expert-labeled decisions "
           f"in {time.time()-t0:.1f}s")
