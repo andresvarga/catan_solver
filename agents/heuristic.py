@@ -24,7 +24,14 @@ LONGEST_ROAD_PUSH_BONUS = 1.5
 MONOPOLY_MIN_HAUL = 3
 
 
-def vertex_production_value(state: GameState, vertex_id: int) -> float:
+def vertex_production_value(state: GameState, vertex_id: int,
+                             resource_weights: dict | None = None) -> float:
+    """`resource_weights` (keyed by env.board.HexType) lets a caller weight
+    resources unevenly -- e.g. to test whether valuing wheat/ore above
+    wood/brick/sheep (they gate cities and every dev card, wood/brick don't
+    scale past the settlement-expansion phase) produces a stronger agent,
+    without changing this function's behavior for anyone who doesn't pass it
+    (default is the original flat-by-pips scoring)."""
     v = state.board.vertices[vertex_id]
     resources_seen = set()
     value = 0.0
@@ -32,7 +39,8 @@ def vertex_production_value(state: GameState, vertex_id: int) -> float:
         hx = state.board.hexes[hex_id]
         if hx.number is None:
             continue
-        value += PIP_COUNT[hx.number]
+        weight = 1.0 if resource_weights is None else resource_weights.get(hx.terrain, 1.0)
+        value += PIP_COUNT[hx.number] * weight
         resources_seen.add(hx.terrain)
     value += 0.5 * len(resources_seen)
     if v.port_generic:
@@ -42,7 +50,8 @@ def vertex_production_value(state: GameState, vertex_id: int) -> float:
     return value
 
 
-def best_reachable_vertex_value(state: GameState, from_vertex: int, max_depth: int = 2) -> float:
+def best_reachable_vertex_value(state: GameState, from_vertex: int, max_depth: int = 2,
+                                 resource_weights: dict | None = None) -> float:
     """BFS outward (ignoring who owns what along the way) for the best
     currently-distance-legal settlement spot within `max_depth` vertex-hops --
     a stand-in for "is this road pointing somewhere worthwhile."""
@@ -58,7 +67,7 @@ def best_reachable_vertex_value(state: GameState, from_vertex: int, max_depth: i
                 continue
             visited.add(adj)
             if vertex_distance_ok(state, adj):
-                best = max(best, vertex_production_value(state, adj))
+                best = max(best, vertex_production_value(state, adj, resource_weights))
             frontier.append((adj, d + 1))
     return best
 
@@ -72,9 +81,24 @@ MAX_TRADE_PROPOSALS_PER_TURN = 2
 
 
 class HeuristicAgent:
-    def __init__(self, player_id: int, rng: random.Random | None = None):
+    def __init__(self, player_id: int, rng: random.Random | None = None,
+                 resource_weights: dict | None = None,
+                 road_value_threshold: float = ROAD_VALUE_THRESHOLD,
+                 knight_value_threshold: float = KNIGHT_VALUE_THRESHOLD,
+                 longest_road_push_bonus: float = LONGEST_ROAD_PUSH_BONUS,
+                 monopoly_min_haul: float = MONOPOLY_MIN_HAUL):
         self.player_id = player_id
         self.rng = rng or random.Random()
+        self.resource_weights = resource_weights
+        # Module-level constants above are hand-picked, never tuned -- these
+        # let a caller override them per instance (see
+        # scripts/resource_weight_tournament.py) to test that empirically
+        # instead of by guesswork, the same way resource_weights does for
+        # vertex_production_value.
+        self.road_value_threshold = road_value_threshold
+        self.knight_value_threshold = knight_value_threshold
+        self.longest_road_push_bonus = longest_road_push_bonus
+        self.monopoly_min_haul = monopoly_min_haul
         self._trade_turn_key: tuple[int, int] | None = None
         self._trade_proposals_this_turn = 0
 
@@ -90,7 +114,8 @@ class HeuristicAgent:
             return actions[0]
         phase = state.phase
         if phase == Phase.SETUP_SETTLEMENT:
-            return self._best(actions, lambda a: vertex_production_value(state, a.params["vertex_id"]))
+            return self._best(actions, lambda a: vertex_production_value(
+                state, a.params["vertex_id"], self.resource_weights))
         if phase == Phase.SETUP_ROAD:
             return self._best(actions, lambda a: self._road_reach_score(state, a.params["edge_id"]))
         if phase == Phase.DISCARD:
@@ -109,13 +134,14 @@ class HeuristicAgent:
     # -- shared valuation -----------------------------------------------------
     def _road_reach_score(self, state: GameState, edge_id: int) -> float:
         a, b = state.board.edges[edge_id].vertex_ids
-        return max(best_reachable_vertex_value(state, a), best_reachable_vertex_value(state, b))
+        return max(best_reachable_vertex_value(state, a, resource_weights=self.resource_weights),
+                   best_reachable_vertex_value(state, b, resource_weights=self.resource_weights))
 
     def _road_score(self, state: GameState, edge_id: int) -> float:
         score = self._road_reach_score(state, edge_id)
         player = state.players[self.player_id]
         if state.longest_road_holder != self.player_id and len(player.roads) + 1 >= MIN_LONGEST_ROAD:
-            score += LONGEST_ROAD_PUSH_BONUS
+            score += self.longest_road_push_bonus
         return score
 
     def _robber_score(self, state: GameState, action: Action) -> float:
@@ -153,16 +179,18 @@ class HeuristicAgent:
 
         if ActionType.BUILD_CITY in by_type:
             return self._best(by_type[ActionType.BUILD_CITY],
-                               lambda a: vertex_production_value(state, a.params["vertex_id"]))
+                               lambda a: vertex_production_value(
+                                   state, a.params["vertex_id"], self.resource_weights))
 
         if ActionType.BUILD_SETTLEMENT in by_type:
             return self._best(by_type[ActionType.BUILD_SETTLEMENT],
-                               lambda a: vertex_production_value(state, a.params["vertex_id"]))
+                               lambda a: vertex_production_value(
+                                   state, a.params["vertex_id"], self.resource_weights))
 
         if ActionType.BUILD_ROAD in by_type:
             best_road = self._best(by_type[ActionType.BUILD_ROAD],
                                     lambda a: self._road_score(state, a.params["edge_id"]))
-            if self._road_score(state, best_road.params["edge_id"]) >= ROAD_VALUE_THRESHOLD:
+            if self._road_score(state, best_road.params["edge_id"]) >= self.road_value_threshold:
                 return best_road
 
         knight = self._maybe_play_knight(state, by_type.get(ActionType.PLAY_KNIGHT, []))
@@ -200,7 +228,7 @@ class HeuristicAgent:
             and (holder is None or player.knights_played + 1 > state.players[holder].knights_played)
         )
         best = self._best(knight_actions, lambda a: self._robber_score(state, a))
-        if pushes_largest_army or self._robber_score(state, best) >= KNIGHT_VALUE_THRESHOLD:
+        if pushes_largest_army or self._robber_score(state, best) >= self.knight_value_threshold:
             return best
         return None
 
@@ -214,7 +242,7 @@ class HeuristicAgent:
             haul = sum(state.players[pid].resources[r] for pid in state.players if pid != self.player_id)
             if haul > best_haul:
                 best, best_haul = a, haul
-        if best is not None and best_haul >= MONOPOLY_MIN_HAUL and missing.get(best.params["resource"], 0) > 0:
+        if best is not None and best_haul >= self.monopoly_min_haul and missing.get(best.params["resource"], 0) > 0:
             return best
         return None
 

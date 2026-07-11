@@ -100,6 +100,12 @@ def main():
     parser.add_argument("--rounds", type=int, default=4)
     parser.add_argument("--games-per-round", type=int, default=400)
     parser.add_argument("--expert-prob", type=float, default=0.0)
+    parser.add_argument("--ore-weight", type=float, default=1.0,
+                         help="resource_weights={ORE: this} for the DAgger labeler only (see "
+                              "scripts/collect_dagger_demos.py / agents/heuristic.py). Found via "
+                              "scripts/resource_weight_tournament.py to give heuristic-vs-heuristic "
+                              "a small but real edge (~+2.5pp win rate at 1.5) over the flat "
+                              "vertex_production_value formula the original demonstrator used.")
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=5e-4,
@@ -130,10 +136,20 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     torch.manual_seed(args.seed)
 
+    from env.board import HexType
+    resource_weights = {HexType.ORE: args.ore_weight} if args.ore_weight != 1.0 else None
+
     model = build_model(args.model_type, args.hidden, args.gnn_layers,
                          public_hand_features=args.public_hand_features)
     ckpt = torch.load(args.init_checkpoint, map_location="cpu")
-    model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt)
+    # strict=False tolerates resuming from a checkpoint saved before
+    # vertex_aux_head existed (training/gnn_model.py) -- it's a training-only
+    # probe, absent state is fine to start from scratch. Anything else missing
+    # or unexpected is a real mismatch, so it's still surfaced.
+    result = model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=False)
+    unexpected_missing = [k for k in result.missing_keys if not k.startswith("vertex_aux_head")]
+    assert not unexpected_missing and not result.unexpected_keys, (
+        f"missing={unexpected_missing} unexpected={result.unexpected_keys}")
     model.eval()
 
     print(f"device={device}  model_type={args.model_type}  rounds={args.rounds}  "
@@ -152,7 +168,8 @@ def main():
         base_seed = args.seed + 1_000_000 + rnd * 10_000
         new = collect_dagger(model, args.games_per_round, base_seed,
                               args.public_hand_features, num_workers=args.num_workers,
-                              expert_prob=args.expert_prob, model_type=args.model_type)
+                              expert_prob=args.expert_prob, model_type=args.model_type,
+                              resource_weights=resource_weights)
         np.savez(os.path.join(args.out_dir, f"dagger_round{rnd}.npz"), **new)
         parts.append(new)
         agg = concat_arrays(parts)

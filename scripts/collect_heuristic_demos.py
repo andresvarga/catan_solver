@@ -96,9 +96,11 @@ def records_to_arrays(records: list[dict], model_type: str = "hier") -> dict[str
     }
 
 
-def play_and_record(seed: int, public_hand_features: bool, model_type: str = "hier") -> list[dict]:
+def play_and_record(seed: int, public_hand_features: bool, model_type: str = "hier",
+                     resource_weights: dict | None = None) -> list[dict]:
     engine = CatanEngine(randomize_board=True, seed=seed)
-    agents = {i: HeuristicAgent(i, random.Random(seed * 97 + i)) for i in range(NUM_PLAYERS)}
+    agents = {i: HeuristicAgent(i, random.Random(seed * 97 + i), resource_weights=resource_weights)
+              for i in range(NUM_PLAYERS)}
     records = []
     steps = 0
     while not engine.done and steps < MAX_STEPS:
@@ -115,18 +117,21 @@ def play_and_record(seed: int, public_hand_features: bool, model_type: str = "hi
 
 _worker_phf = False
 _worker_model_type = "hier"
+_worker_resource_weights = None
 
 
-def _init_worker(public_hand_features: bool, model_type: str = "hier") -> None:
-    global _worker_phf, _worker_model_type
+def _init_worker(public_hand_features: bool, model_type: str = "hier",
+                  resource_weights: dict | None = None) -> None:
+    global _worker_phf, _worker_model_type, _worker_resource_weights
     _worker_phf = public_hand_features
     _worker_model_type = model_type
+    _worker_resource_weights = resource_weights
 
 
 def _worker_collect(seeds: list[int]) -> list[dict]:
     out = []
     for seed in seeds:
-        out.extend(play_and_record(seed, _worker_phf, _worker_model_type))
+        out.extend(play_and_record(seed, _worker_phf, _worker_model_type, _worker_resource_weights))
     return out
 
 
@@ -139,20 +144,27 @@ def main():
     parser.add_argument("--model-type", choices=["hier", "gnn"], default="hier",
                          help="observation encoding to record: 'hier' (flat vector) or "
                               "'gnn' (graph-encoded board, see training/graph_features.py)")
+    parser.add_argument("--ore-weight", type=float, default=1.0,
+                         help="resource_weights={ORE: this} for all 4 self-play seats (see "
+                              "agents/heuristic.py) -- this dataset has no opponent/demonstrator "
+                              "split, every seat's decisions are recorded as demonstrations.")
     parser.add_argument("--out", type=str, required=True)
     args = parser.parse_args()
+
+    from env.board import HexType
+    resource_weights = {HexType.ORE: args.ore_weight} if args.ore_weight != 1.0 else None
 
     seeds = list(range(args.seed, args.seed + args.games))
     t0 = time.time()
     if args.num_workers <= 1:
-        _init_worker(args.public_hand_features, args.model_type)
+        _init_worker(args.public_hand_features, args.model_type, resource_weights)
         records = _worker_collect(seeds)
     else:
         nw = max(1, min(args.num_workers, args.games))
         chunks = [seeds[i::nw] for i in range(nw)]
         ctx = mp.get_context("fork")
         with ctx.Pool(processes=nw, initializer=_init_worker,
-                      initargs=(args.public_hand_features, args.model_type)) as pool:
+                      initargs=(args.public_hand_features, args.model_type, resource_weights)) as pool:
             results = pool.map(_worker_collect, chunks)
         records = [r for chunk in results for r in chunk]
     elapsed = time.time() - t0
