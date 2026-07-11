@@ -108,8 +108,8 @@ def main():
                               "vertex_production_value formula the original demonstrator used.")
     parser.add_argument("--labeler", choices=["heuristic", "search"], default="heuristic",
                          help="'search' = 1-ply lookahead expert (agents/search_heuristic.py, "
-                              "~50% win rate vs 3 plain heuristics -- double the static "
-                              "heuristic's 27%). The static teacher's DAgger plateau (~28% on "
+                              "~50%% win rate vs 3 plain heuristics -- double the static "
+                              "heuristic's 27%%). The static teacher's DAgger plateau (~28%% on "
                               "fresh seeds after 12 rounds) motivated it.")
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=1024)
