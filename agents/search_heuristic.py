@@ -1,4 +1,4 @@
-"""1-ply search demonstrator (teacher upgrade after the DAgger plateau).
+"""Search demonstrator (teacher upgrade after the DAgger plateau).
 
 The plain HeuristicAgent scores candidate actions with static formulas
 (vertex_production_value etc.) and never looks at the state an action
@@ -19,7 +19,14 @@ draws, robber steals, monopoly, player trades) keep the base heuristic's
 behavior: simulating them would either leak hidden information into the
 demonstration policy (which the student, seeing only public state, could
 never reproduce) or require modeling opponent responses.
-"""
+
+Depth (`search_depth`): at depth 2+ the search continues through the
+agent's OWN same-turn follow-ups -- after simulating a candidate it also
+considers the best next searchable action from the resulting position
+(maritime-trade-then-build-city, road-then-settlement), beam-limited to
+`beam_width` continuations. The second ply is never an opponent reply:
+opponents' turns open with a dice roll and their hands are hidden, so
+searching into them would break the same no-hidden-information rule."""
 from __future__ import annotations
 
 import copy
@@ -28,7 +35,9 @@ import random
 from agents.heuristic import HeuristicAgent, vertex_production_value
 from env.actions import Action, ActionType
 from env.board import HexType
-from env.engine import pay, step as engine_step, total_vp, vertex_distance_ok
+from env.engine import (
+    acting_player, legal_actions, pay, step as engine_step, total_vp, vertex_distance_ok,
+)
 from env.state import BUILDING_COSTS, GameState, Phase
 
 # Deterministic, public-outcome types -- safe and meaningful to simulate.
@@ -72,12 +81,21 @@ def copy_state(state: GameState) -> GameState:
     return copy.deepcopy(state, memo={id(state.board): state.board})
 
 
+# Same-turn continuation candidates at ply 2+. END_TURN is excluded (its
+# value is already the "stop here" baseline every continuation must beat);
+# BUY_DEV_CARD is excluded (it's a leaf -- see _score_candidate).
+CONTINUATION_TYPES = SEARCHABLE_MAIN - {ActionType.END_TURN, ActionType.BUY_DEV_CARD}
+
+
 class SearchHeuristicAgent(HeuristicAgent):
     def __init__(self, player_id: int, rng: random.Random | None = None,
                  resource_weights: dict | None = ORE_WEIGHT,
-                 weights: dict | None = None):
+                 weights: dict | None = None,
+                 search_depth: int = 2, beam_width: int = 6):
         super().__init__(player_id, rng, resource_weights=resource_weights)
         self._sim_rng = random.Random(0)  # searchable actions never consult it
+        self.search_depth = search_depth
+        self.beam_width = beam_width
         self.w = dict(DEFAULT_EVAL_WEIGHTS)
         if weights:
             self.w.update(weights)
@@ -141,17 +159,42 @@ class SearchHeuristicAgent(HeuristicAgent):
         v -= w["opp_vp"] * opp_best
         return v
 
+    def _position_value(self, state: GameState, depth: int) -> float:
+        """Value of a position the agent acts from: its static eval, or --
+        while `depth` allows and it's still this agent's MAIN turn -- the
+        best value reachable by continuing with further same-turn searchable
+        actions (beam-limited by static eval). Never recurses into another
+        player's turn or a non-MAIN phase."""
+        v = self.eval_state(state)
+        if depth <= 0 or state.winner is not None or state.phase != Phase.MAIN \
+                or acting_player(state) != self.player_id:
+            return v
+        followups = [a for a in legal_actions(state) if a.type in CONTINUATION_TYPES]
+        if not followups:
+            return v
+        scored = []
+        for a in followups:
+            sim = copy_state(state)
+            engine_step(sim, a, rng=self._sim_rng)
+            scored.append((self.eval_state(sim), sim))
+        scored.sort(key=lambda t: -t[0])
+        for leaf_val, sim in scored[:self.beam_width]:
+            v = max(v, self._position_value(sim, depth - 1) if depth > 1 else leaf_val)
+        return v
+
     def _score_candidate(self, state: GameState, a: Action) -> float:
         if a.type == ActionType.BUY_DEV_CARD:
             # Simulate the payment only; actually drawing in simulation would
             # condition the choice on deck order (hidden information). The
-            # card's value enters as a flat expectation term instead.
+            # card's value enters as a flat expectation term instead. Leaf:
+            # no continuation, since the post-payment state is already an
+            # approximation (the real one holds an extra unseen card).
             sim = copy_state(state)
             pay(sim, self.player_id, BUILDING_COSTS["dev_card"])
             return self.eval_state(sim) + self.w["dev_ev"]
         sim = copy_state(state)
         engine_step(sim, a, rng=self._sim_rng)
-        return self.eval_state(sim)
+        return self._position_value(sim, self.search_depth - 1)
 
     def _search(self, state: GameState, candidates: list[Action]) -> Action:
         best_action, best_score = None, None
@@ -164,7 +207,6 @@ class SearchHeuristicAgent(HeuristicAgent):
 
     # -- dispatch -------------------------------------------------------------
     def choose(self, state: GameState, legal: list[Action] | None = None) -> Action:
-        from env.engine import legal_actions
         actions = legal if legal is not None else legal_actions(state)
         if not actions:
             raise RuntimeError(f"No legal actions in phase {state.phase}")

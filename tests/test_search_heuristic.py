@@ -49,6 +49,41 @@ def test_simulation_never_mutates_the_real_state():
         steps += 1
 
 
+def test_two_ply_sees_same_turn_continuations():
+    """_position_value at depth>=1 must be able to exceed the static eval by
+    chaining a same-turn follow-up (the whole point of the second ply), and
+    depth=0 must equal the static eval exactly."""
+    engine = CatanEngine(randomize_board=True, seed=9)
+    agent = SearchHeuristicAgent(0, random.Random(0))
+    # advance the game a bit so player 0 has a real position
+    agents = {i: SearchHeuristicAgent(i, random.Random(i)) for i in range(NUM_PLAYERS)}
+    steps = 0
+    while not engine.done and steps < 400:
+        acts = legal_actions(engine.state)
+        engine.step(agents[engine.acting_player()].choose(engine.state, acts))
+        steps += 1
+    state = engine.state
+    v0 = agent._position_value(state, 0)
+    assert v0 == agent.eval_state(state)
+    v1 = agent._position_value(state, 1)
+    assert v1 >= v0 - 1e-9  # continuation can only add options, never lose value
+
+
+def test_search_depth_1_matches_leaf_scoring():
+    """A depth-1 agent's candidate scores must equal plain eval-after-step
+    (no continuation) -- guards the depth plumbing."""
+    engine = CatanEngine(randomize_board=True, seed=13)
+    a1 = SearchHeuristicAgent(0, random.Random(0), search_depth=1)
+    state = engine.state
+    acts = legal_actions(state)
+    for a in acts[:5]:
+        from agents.search_heuristic import copy_state as cs
+        from env.engine import step as estep
+        sim = cs(state)
+        estep(sim, a, rng=random.Random(0))
+        assert abs(a1._score_candidate(state, a) - a1.eval_state(sim)) < 1e-9
+
+
 def test_copy_state_shares_board_but_not_players():
     engine = CatanEngine(randomize_board=True, seed=7)
     sim = copy_state(engine.state)
