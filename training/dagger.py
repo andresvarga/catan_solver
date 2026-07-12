@@ -107,10 +107,13 @@ def main():
                               "a small but real edge (~+2.5pp win rate at 1.5) over the flat "
                               "vertex_production_value formula the original demonstrator used.")
     parser.add_argument("--labeler", choices=["heuristic", "search"], default="heuristic",
-                         help="'search' = 1-ply lookahead expert (agents/search_heuristic.py, "
-                              "~50%% win rate vs 3 plain heuristics -- double the static "
-                              "heuristic's 27%%). The static teacher's DAgger plateau (~28%% on "
+                         help="'search' = lookahead expert (agents/search_heuristic.py, "
+                              "~51%% win rate vs 3 plain heuristics at depth 1, ~58%% at "
+                              "depth 2+). The static teacher's DAgger plateau (~28%% on "
                               "fresh seeds after 12 rounds) motivated it.")
+    parser.add_argument("--labeler-search-depth", type=int, default=2,
+                         help="search labeler only: same-turn lookahead depth (depths 2 and 3 "
+                              "measured equal-strength on paired seeds; 3 costs ~2.5x more)")
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=5e-4,
@@ -174,7 +177,8 @@ def main():
         new = collect_dagger(model, args.games_per_round, base_seed,
                               args.public_hand_features, num_workers=args.num_workers,
                               expert_prob=args.expert_prob, model_type=args.model_type,
-                              resource_weights=resource_weights, labeler_kind=args.labeler)
+                              resource_weights=resource_weights, labeler_kind=args.labeler,
+                              labeler_search_depth=args.labeler_search_depth)
         np.savez(os.path.join(args.out_dir, f"dagger_round{rnd}.npz"), **new)
         parts.append(new)
         agg = concat_arrays(parts)

@@ -38,21 +38,25 @@ from scripts.collect_heuristic_demos import MAX_STEPS, encode_decision, records_
 
 
 def make_labeler(kind: str, seat: int, rng: random.Random,
-                  resource_weights: dict | None):
+                  resource_weights: dict | None, search_depth: int = 2):
     """The expert whose choices become the imitation targets. 'search' is the
-    1-ply lookahead agent (agents/search_heuristic.py, ~50% win rate vs 3
-    plain heuristics -- roughly double the static heuristic's strength)."""
+    lookahead agent (agents/search_heuristic.py, ~51% win rate vs 3 plain
+    heuristics at depth 1, ~58% at depth 2+; depths 2 and 3 measured
+    equal-strength on paired seeds, depth 3 just costs ~2.5x more)."""
     if kind == "search":
         from agents.search_heuristic import SearchHeuristicAgent
-        return SearchHeuristicAgent(seat, rng) if resource_weights is None else \
-            SearchHeuristicAgent(seat, rng, resource_weights=resource_weights)
+        kwargs = {"search_depth": search_depth}
+        if resource_weights is not None:
+            kwargs["resource_weights"] = resource_weights
+        return SearchHeuristicAgent(seat, rng, **kwargs)
     return HeuristicAgent(seat, rng, resource_weights=resource_weights)
 
 
 def play_and_record_dagger(seed: int, public_hand_features: bool, model,
                             expert_prob: float = 0.0, model_type: str = "hier",
                             resource_weights: dict | None = None,
-                            labeler_kind: str = "heuristic") -> list[dict]:
+                            labeler_kind: str = "heuristic",
+                            labeler_search_depth: int = 2) -> list[dict]:
     from training.agent import HierarchicalLearnedAgent
 
     torch.manual_seed(seed)  # policy sampling reproducible per game
@@ -73,7 +77,7 @@ def play_and_record_dagger(seed: int, public_hand_features: bool, model,
     # per-turn internal state, so the labeler must not be one of the playing
     # opponents (whose seats/perspectives differ anyway).
     labeler = make_labeler(labeler_kind, policy_seat, random.Random(seed * 173 + 11),
-                            resource_weights)
+                            resource_weights, labeler_search_depth)
 
     records = []
     steps = 0
@@ -103,35 +107,40 @@ _w_expert_prob = 0.0
 _w_model_type = "hier"
 _w_resource_weights = None
 _w_labeler_kind = "heuristic"
+_w_labeler_depth = 2
 
 
 def _init_worker(model, phf: bool, expert_prob: float, model_type: str = "hier",
                   resource_weights: dict | None = None,
-                  labeler_kind: str = "heuristic") -> None:
-    global _w_model, _w_phf, _w_expert_prob, _w_model_type, _w_resource_weights, _w_labeler_kind
+                  labeler_kind: str = "heuristic", labeler_search_depth: int = 2) -> None:
+    global _w_model, _w_phf, _w_expert_prob, _w_model_type, _w_resource_weights, \
+        _w_labeler_kind, _w_labeler_depth
     torch.set_num_threads(1)
     model.eval()
     _w_model, _w_phf, _w_expert_prob, _w_model_type = model, phf, expert_prob, model_type
     _w_resource_weights = resource_weights
     _w_labeler_kind = labeler_kind
+    _w_labeler_depth = labeler_search_depth
 
 
 def _worker_collect(seeds: list[int]) -> list[dict]:
     out = []
     for seed in seeds:
         out.extend(play_and_record_dagger(seed, _w_phf, _w_model, _w_expert_prob, _w_model_type,
-                                           _w_resource_weights, _w_labeler_kind))
+                                           _w_resource_weights, _w_labeler_kind,
+                                           _w_labeler_depth))
     return out
 
 
 def collect_dagger(model, games: int, base_seed: int, public_hand_features: bool,
                     num_workers: int = 12, expert_prob: float = 0.0,
                     model_type: str = "hier", resource_weights: dict | None = None,
-                    labeler_kind: str = "heuristic") -> dict[str, np.ndarray]:
+                    labeler_kind: str = "heuristic",
+                    labeler_search_depth: int = 2) -> dict[str, np.ndarray]:
     seeds = list(range(base_seed, base_seed + games))
     if num_workers <= 1:
         _init_worker(model, public_hand_features, expert_prob, model_type, resource_weights,
-                      labeler_kind)
+                      labeler_kind, labeler_search_depth)
         records = _worker_collect(seeds)
     else:
         nw = max(1, min(num_workers, games))
@@ -139,7 +148,8 @@ def collect_dagger(model, games: int, base_seed: int, public_hand_features: bool
         ctx = mp.get_context("fork")
         with ctx.Pool(processes=nw, initializer=_init_worker,
                       initargs=(model, public_hand_features, expert_prob, model_type,
-                                resource_weights, labeler_kind)) as pool:
+                                resource_weights, labeler_kind,
+                                labeler_search_depth)) as pool:
             records = [r for chunk in pool.map(_worker_collect, chunks) for r in chunk]
     return records_to_arrays(records, model_type)
 
@@ -158,7 +168,9 @@ def main():
                          help="resource_weights={ORE: this} for the labeler only (see "
                               "agents/heuristic.py) -- opponent seats stay unweighted.")
     parser.add_argument("--labeler", choices=["heuristic", "search"], default="heuristic",
-                         help="'search' = 1-ply lookahead expert (agents/search_heuristic.py)")
+                         help="'search' = lookahead expert (agents/search_heuristic.py)")
+    parser.add_argument("--labeler-search-depth", type=int, default=2,
+                         help="search labeler only: same-turn lookahead depth")
     parser.add_argument("--num-workers", type=int, default=12)
     parser.add_argument("--out", type=str, required=True)
     args = parser.parse_args()
@@ -177,7 +189,8 @@ def main():
     arrays = collect_dagger(model, args.games, args.seed, args.public_hand_features,
                              num_workers=args.num_workers, expert_prob=args.expert_prob,
                              model_type=args.model_type, resource_weights=resource_weights,
-                             labeler_kind=args.labeler)
+                             labeler_kind=args.labeler,
+                             labeler_search_depth=args.labeler_search_depth)
     n = arrays["type_idx"].shape[0]
     print(f"{args.games} learner-rollout games -> {n} expert-labeled decisions "
           f"in {time.time()-t0:.1f}s")
