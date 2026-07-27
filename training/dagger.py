@@ -106,7 +106,7 @@ def main():
                               "scripts/resource_weight_tournament.py to give heuristic-vs-heuristic "
                               "a small but real edge (~+2.5pp win rate at 1.5) over the flat "
                               "vertex_production_value formula the original demonstrator used.")
-    parser.add_argument("--labeler", choices=["heuristic", "search"], default="heuristic",
+    parser.add_argument("--labeler", choices=["heuristic", "search", "rollout", "rollout-override"], default="heuristic",
                          help="'search' = lookahead expert (agents/search_heuristic.py, "
                               "~51%% win rate vs 3 plain heuristics at depth 1, ~58%% at "
                               "depth 2+). The static teacher's DAgger plateau (~28%% on "

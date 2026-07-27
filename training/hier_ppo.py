@@ -259,7 +259,11 @@ def compute_holdout_nll(model, holdout: dict[str, torch.Tensor], batch_size: int
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             tb = {k: v[start:end] for k, v in holdout.items() if k != "obs"}
-            logprob, _, _ = model.evaluate_actions(holdout["obs"][start:end], tb)
+            # obs is a flat Tensor (hier) or dict[str, Tensor] (gnn)
+            obs = holdout["obs"]
+            obs_mb = {k: v[start:end] for k, v in obs.items()} if isinstance(obs, dict) \
+                else obs[start:end]
+            logprob, _, _ = model.evaluate_actions(obs_mb, tb)
             total += float(logprob.sum())
     model.train()
     return -total / n
@@ -338,7 +342,8 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
             if use_bc:
                 demo_idx = torch.randint(n_demo, (min(bc_minibatch_size, n_demo),), device=device)
                 demo_tb = {k: v[demo_idx] for k, v in bc_dataset.items() if k != "obs"}
-                demo_logprob, _, _ = model.evaluate_actions(bc_dataset["obs"][demo_idx], demo_tb)
+                demo_logprob, _, _ = model.evaluate_actions(
+                    _index_batch(bc_dataset["obs"], demo_idx), demo_tb)
                 bc_loss = -demo_logprob.mean()
                 loss = loss + bc_coef * bc_loss
                 stats["bc_loss"].append(bc_loss.item())

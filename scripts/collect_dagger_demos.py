@@ -33,16 +33,70 @@ import torch
 
 from agents.heuristic import HeuristicAgent
 from env.engine import CatanEngine, legal_actions
-from env.state import NUM_PLAYERS
+from env.state import NUM_PLAYERS, Phase
 from scripts.collect_heuristic_demos import MAX_STEPS, encode_decision, records_to_arrays
+
+# Phases the search-family labelers actually search (agents/search_heuristic.py)
+_SEARCHED_PHASES = {Phase.SETUP_SETTLEMENT, Phase.SETUP_ROAD, Phase.DISCARD}
+
+
+def _labeler_owns_decision(labeler_kind: str, state, expert_action, labeler=None) -> bool:
+    """Whether this decision's label reflects the labeler's actual expertise.
+
+    The search/rollout teachers only search deterministic-public-outcome
+    decisions; for everything else (robber placement, trade responses,
+    knight/monopoly timing, trade proposals) they silently defer to the plain
+    heuristic's gates. Recording those deferred choices as imitation targets
+    actively OVERWRITES whatever the student already knows there -- measured:
+    an expert-iteration chain initialized from an RL-fine-tuned champion
+    degraded 58.1% -> 49.6% in 3 rounds, because RL's gains live largely in
+    exactly the decisions search cannot own and BC kept reverting them to
+    heuristic behavior. So for those labelers, only searched decisions are
+    recorded; the plain-heuristic labeler keeps recording everything (its
+    students have no better prior to protect)."""
+    if labeler_kind == "heuristic":
+        return True
+    if labeler_kind == "rollout-override":
+        # Strictest filter (after 'rollout' with the searched-decision filter
+        # STILL degraded the RL champion 58.1% -> 54.2% in one round): record
+        # ONLY MAIN decisions where the model-driven rollouts overrode the
+        # static search ranking. Those are the only labels that carry
+        # information beyond eval_state -- everything else in the teacher is
+        # a policy family the RL champion has already moved past.
+        return state.phase == Phase.MAIN and getattr(labeler, "last_overrode", False)
+    from agents.search_heuristic import SEARCHABLE_MAIN
+    if state.phase in _SEARCHED_PHASES:
+        return True
+    return state.phase == Phase.MAIN and expert_action.type in SEARCHABLE_MAIN
 
 
 def make_labeler(kind: str, seat: int, rng: random.Random,
-                  resource_weights: dict | None, search_depth: int = 2):
+                  resource_weights: dict | None, search_depth: int = 2,
+                  model=None, model_type: str = "gnn",
+                  public_hand_features: bool = True):
     """The expert whose choices become the imitation targets. 'search' is the
     lookahead agent (agents/search_heuristic.py, ~51% win rate vs 3 plain
     heuristics at depth 1, ~58% at depth 2+; depths 2 and 3 measured
-    equal-strength on paired seeds, depth 3 just costs ~2.5x more)."""
+    equal-strength on paired seeds, depth 3 just costs ~2.5x more).
+    'rollout' is expert iteration: the same search agent, but near-tied
+    candidates are settled by determinized rollouts in which THIS seat's
+    continuations are played by `model` (the current student) -- the teacher
+    is literally search wrapped around the policy being trained, so it
+    strengthens automatically as the student improves round over round."""
+    if kind in ("rollout", "rollout-override"):
+        assert model is not None, f"labeler '{kind}' needs the student model"
+        from agents.search_heuristic import RolloutSearchAgent
+        from training.agent import HierarchicalLearnedAgent
+
+        def factory(pid):
+            return HierarchicalLearnedAgent(pid, model=model, deterministic=True,
+                                             model_kind=model_type,
+                                             public_hand_features=public_hand_features)
+        kwargs = {"search_depth": search_depth, "rollouts": 6, "rollout_margin": 6.0,
+                  "rollout_top_m": 4, "rollout_agent_factory": factory}
+        if resource_weights is not None:
+            kwargs["resource_weights"] = resource_weights
+        return RolloutSearchAgent(seat, rng, **kwargs)
     if kind == "search":
         from agents.search_heuristic import SearchHeuristicAgent
         kwargs = {"search_depth": search_depth}
@@ -77,7 +131,9 @@ def play_and_record_dagger(seed: int, public_hand_features: bool, model,
     # per-turn internal state, so the labeler must not be one of the playing
     # opponents (whose seats/perspectives differ anyway).
     labeler = make_labeler(labeler_kind, policy_seat, random.Random(seed * 173 + 11),
-                            resource_weights, labeler_search_depth)
+                            resource_weights, labeler_search_depth,
+                            model=model, model_type=model_type,
+                            public_hand_features=public_hand_features)
 
     records = []
     steps = 0
@@ -87,7 +143,8 @@ def play_and_record_dagger(seed: int, public_hand_features: bool, model,
         acts = legal_actions(state)
         if actor == policy_seat:
             expert_action = labeler.choose(state, acts)
-            if len(acts) > 1:
+            if len(acts) > 1 and _labeler_owns_decision(labeler_kind, state, expert_action,
+                                                          labeler):
                 records.append(encode_decision(state, actor, acts, expert_action,
                                                 public_hand_features, model_type))
             if expert_prob > 0 and mix_rng.random() < expert_prob:
@@ -167,8 +224,10 @@ def main():
     parser.add_argument("--ore-weight", type=float, default=1.0,
                          help="resource_weights={ORE: this} for the labeler only (see "
                               "agents/heuristic.py) -- opponent seats stay unweighted.")
-    parser.add_argument("--labeler", choices=["heuristic", "search"], default="heuristic",
-                         help="'search' = lookahead expert (agents/search_heuristic.py)")
+    parser.add_argument("--labeler", choices=["heuristic", "search", "rollout", "rollout-override"], default="heuristic",
+                         help="'search' = lookahead expert (agents/search_heuristic.py); "
+                              "'rollout' = expert iteration (search + determinized rollouts "
+                              "with the checkpoint model as own-seat rollout policy)")
     parser.add_argument("--labeler-search-depth", type=int, default=2,
                          help="search labeler only: same-turn lookahead depth")
     parser.add_argument("--num-workers", type=int, default=12)

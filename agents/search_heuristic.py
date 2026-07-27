@@ -34,11 +34,13 @@ import random
 
 from agents.heuristic import HeuristicAgent, vertex_production_value
 from env.actions import Action, ActionType
-from env.board import HexType
+from env.board import HexType, Resource
 from env.engine import (
     acting_player, legal_actions, pay, step as engine_step, total_vp, vertex_distance_ok,
 )
-from env.state import BUILDING_COSTS, GameState, Phase
+from env.state import (
+    BUILDING_COSTS, GameState, Phase, empty_dev_hand, empty_hand,
+)
 
 # Deterministic, public-outcome types -- safe and meaningful to simulate.
 # BUY_DEV_CARD is searchable via a payment-only simulation plus a flat
@@ -228,3 +230,216 @@ class SearchHeuristicAgent(HeuristicAgent):
             return self._search(state, searchable)
         # ROLL / MOVE_ROBBER / TRADE_RESPONSE etc.: base behavior
         return super().choose(state, actions)
+
+
+class RolloutSearchAgent(SearchHeuristicAgent):
+    """Adds determinized-rollout evaluation on top of the same-turn search.
+
+    The same-turn search's blind spot is everything that happens after
+    END_TURN: opponent builds that take contested spots, the robber landing
+    on us, dice variance between "bank toward a city" and "build the road
+    now". Deepening the same-turn search cannot see any of that (depths 2
+    and 3 measured equal-strength), so the upgrade is a different axis:
+    for the top few near-tied candidates, play out one full table rotation
+    with the real engine and average the resulting positions.
+
+    Hidden information is handled by determinization, which is what keeps
+    the demonstration policy imitable: before each rollout, everything this
+    seat cannot see -- opponents' hand compositions, opponents' unplayed dev
+    cards, the deck order -- is re-sampled from public knowledge (hand/card
+    counts are public; `state.public_resource_estimates` is the engine's
+    card-counting prior). The rollout then runs on a sampled world, so its
+    outcome is a function of public state + own hand only, never of the true
+    hidden cards. This also makes BUY_DEV_CARD honestly simulable inside a
+    rollout: drawing from a re-shuffled deck leaks nothing.
+
+    Rollouts are paired (common random numbers): the same K determinization/
+    dice seeds are reused across all finalists, so most of the sampling noise
+    cancels in the comparison. Cost control: rollouts trigger only when >=2
+    candidates sit within `rollout_margin` eval-points of the best -- the
+    clear-cut majority of decisions stay pure same-turn search."""
+
+    def __init__(self, player_id: int, rng: random.Random | None = None,
+                 resource_weights: dict | None = ORE_WEIGHT,
+                 weights: dict | None = None,
+                 search_depth: int = 2, beam_width: int = 6,
+                 rollouts: int = 6, rollout_top_m: int = 3,
+                 rollout_margin: float = 3.0, rollout_rotations: int = 1,
+                 max_rollout_steps: int = 150, win_bonus: float = 150.0,
+                 rollout_agent_factory=None):
+        super().__init__(player_id, rng, resource_weights=resource_weights,
+                          weights=weights, search_depth=search_depth,
+                          beam_width=beam_width)
+        self.rollouts = rollouts
+        self.rollout_top_m = rollout_top_m
+        self.rollout_margin = rollout_margin
+        self.rollout_rotations = rollout_rotations
+        self.max_rollout_steps = max_rollout_steps
+        self.win_bonus = win_bonus
+        # Expert iteration hook: `rollout_agent_factory(pid) -> agent` replaces
+        # the rollout policy for THIS seat only (e.g. with the current trained
+        # model -- at deployment this seat's future actions are the model's,
+        # so a model rollout policy is the accurate self-model). Opponent
+        # seats always stay plain HeuristicAgent: in the eval/collection
+        # condition the opponents literally are plain heuristics, so that is
+        # the true opponent model, not an approximation. The agent is built
+        # once and reused across rollouts, so the factory should return a
+        # per-turn-stateless agent (deterministic model agents qualify).
+        self._rollout_agent_factory = rollout_agent_factory
+        self._rollout_self_agent = None
+        # observability counters (tournament scripts read these)
+        self.decisions = 0
+        self.rollout_decisions = 0
+        # per-decision flags (DAgger label filtering reads these): whether the
+        # last MAIN-phase choose() ran rollouts, and whether the rollout
+        # verdict OVERRODE the static search's top candidate -- overridden
+        # decisions are the only ones whose label carries information beyond
+        # eval_state (namely, what the model-driven rollouts saw).
+        self.last_gated = False
+        self.last_overrode = False
+
+    # -- determinization ------------------------------------------------------
+    def _determinize(self, sim: GameState, rr: random.Random) -> None:
+        """Re-sample everything this seat cannot see, preserving all public
+        counts. Mutates `sim` (a copy) only."""
+        me = self.player_id
+
+        # Opponents' unplayed dev cards + the deck form one hidden pool.
+        # Redeal preserving each opponent's total and bought-this-turn count
+        # (both public), remainder becomes the deck (size preserved).
+        pool = list(sim.dev_card_deck)
+        opp_counts: dict[int, tuple[int, int]] = {}
+        for pid, p in sim.players.items():
+            if pid == me:
+                continue
+            opp_counts[pid] = (p.total_dev_cards(),
+                               sum(p.dev_cards_bought_this_turn.values()))
+            for card, k in p.dev_cards.items():
+                pool.extend([card] * k)
+            p.dev_cards = empty_dev_hand()
+            p.dev_cards_bought_this_turn = empty_dev_hand()
+        rr.shuffle(pool)
+        i = 0
+        for pid, (held, bought) in opp_counts.items():
+            p = sim.players[pid]
+            dealt = pool[i:i + held]
+            i += held
+            for card in dealt:
+                p.dev_cards[card] += 1
+            for card in dealt[:bought]:
+                p.dev_cards_bought_this_turn[card] += 1
+        sim.dev_card_deck = pool[i:]
+
+        # Opponents' resource hands: counts are public; composition is
+        # sampled around the engine's card-counting prior (integer part =
+        # publicly certain cards, remainder ~ fractional mass + uniform floor).
+        resources = list(Resource)
+        for pid, p in sim.players.items():
+            if pid == me:
+                continue
+            n = p.hand_size()
+            est = sim.public_resource_estimates.get(pid, {})
+            hand = empty_hand()
+            known = 0
+            for r in resources:
+                k = min(n - known, int(est.get(r, 0.0)))
+                hand[r] = k
+                known += k
+            weights = {r: (est.get(r, 0.0) - int(est.get(r, 0.0))) + 0.25
+                       for r in resources}
+            for _ in range(n - known):
+                total = sum(weights.values())
+                x = rr.random() * total
+                for r in resources:
+                    x -= weights[r]
+                    if x <= 0:
+                        hand[r] += 1
+                        break
+                else:
+                    hand[resources[-1]] += 1
+            p.resources = hand
+
+    # -- rollout --------------------------------------------------------------
+    def _rollout_value(self, state: GameState, action: Action, seed: int) -> float:
+        """Execute `action` in a determinized copy, then play everyone with
+        the plain heuristic until the start of this seat's next turn (or a
+        winner / step cap), and evaluate. The board is shared with the real
+        state and rollouts DO move the robber, so robber_hex is restored
+        before returning."""
+        rr = random.Random(seed)
+        sim = copy_state(state)
+        saved_robber = state.board.robber_hex
+        try:
+            self._determinize(sim, rr)
+            engine_step(sim, action, rng=rr)
+            agents = {
+                pid: HeuristicAgent(
+                    pid, random.Random(rr.randrange(2 ** 31)),
+                    resource_weights=self.resource_weights if pid == self.player_id else None)
+                for pid in sim.players
+            }
+            if self._rollout_agent_factory is not None:
+                if self._rollout_self_agent is None:
+                    self._rollout_self_agent = self._rollout_agent_factory(self.player_id)
+                agents[self.player_id] = self._rollout_self_agent
+            rotations_seen = 0
+            for _ in range(self.max_rollout_steps):
+                if sim.winner is not None:
+                    return self._terminal_value(sim)
+                # each arrival at our own pre-roll marks one full rotation;
+                # stop at the requested horizon (arrival is counted once --
+                # the next step is the roll itself, which leaves Phase.ROLL)
+                if sim.current_player == self.player_id and sim.phase == Phase.ROLL:
+                    rotations_seen += 1
+                    if rotations_seen >= self.rollout_rotations:
+                        break
+                acts = legal_actions(sim)
+                act = acts[0] if len(acts) == 1 else \
+                    agents[acting_player(sim)].choose(sim, acts)
+                engine_step(sim, act, rng=rr)
+            return self._terminal_value(sim)
+        finally:
+            state.board.robber_hex = saved_robber
+
+    def _terminal_value(self, sim: GameState) -> float:
+        v = self.eval_state(sim)
+        if sim.winner == self.player_id:
+            v += self.win_bonus
+        elif sim.winner is not None:
+            v -= self.win_bonus
+        return v
+
+    def choose(self, state: GameState, legal: list[Action] | None = None) -> Action:
+        # reset per-decision flags here, not in _search: MAIN choose() can
+        # return via the base heuristic without ever reaching _search, which
+        # would otherwise leave stale flags for label filtering to misread
+        self.last_gated = False
+        self.last_overrode = False
+        return super().choose(state, legal)
+
+    # -- search with rollout tie-break -----------------------------------------
+    def _search(self, state: GameState, candidates: list[Action]) -> Action:
+        """Same-turn search first; when the top candidates are near-tied
+        (within rollout_margin) the decision goes to paired determinized
+        rollouts. Non-MAIN phases (setup, discard) keep the pure search:
+        their rollouts would be dominated by whole-game noise."""
+        if state.phase != Phase.MAIN:
+            return super()._search(state, candidates)
+        self.decisions += 1
+        scored = sorted(((self._score_candidate(state, a), a) for a in candidates),
+                        key=lambda t: -t[0])
+        best_score = scored[0][0]
+        finalists = [a for s, a in scored[:self.rollout_top_m]
+                     if s >= best_score - self.rollout_margin]
+        if len(finalists) < 2:
+            return scored[0][1]
+        self.rollout_decisions += 1
+        self.last_gated = True
+        seeds = [self.rng.randrange(2 ** 31) for _ in range(self.rollouts)]
+        best_action, best_mean = finalists[0], None
+        for a in finalists:
+            mean = sum(self._rollout_value(state, a, sd) for sd in seeds) / len(seeds)
+            if best_mean is None or mean > best_mean:
+                best_action, best_mean = a, mean
+        self.last_overrode = best_action is not scored[0][1]
+        return best_action
