@@ -1,7 +1,8 @@
 """PPO self-play training CLI using the hierarchical/pointer action head
-(training/hier_model.py, training/hier_ppo.py) -- mirrors training/train.py,
-which used the flat index-into-legal_actions model that was shown (see
-README "Status") to collapse once trading was enabled. Evaluates against
+(training/hier_model.py, training/hier_ppo.py) -- supersedes the old flat
+index-into-legal_actions model (training/model.ActorCritic, since removed),
+which was shown (see README "Status") to collapse once trading was enabled.
+Evaluates against
 both the fixed random/heuristic tiers in the *full* ruleset (§12's "unmoving
 yardstick") and, importantly, under the *same* curriculum settings training
 is currently using -- that same-distribution/full-ruleset split is exactly

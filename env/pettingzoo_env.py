@@ -310,8 +310,8 @@ def build_observation(state, pid: int, legal_cache: list[Action], show_mask: boo
                        public_hand_features: bool = False) -> dict:
     """Builds the same observation dict `CatanAECEnv.observe` returns, but
     directly from a raw `GameState` -- lets a standalone agent (e.g.
-    `training.agent.LearnedAgent`) query a trained policy outside the AEC
-    wrapper, using the exact same encoding path training used."""
+    `training.agent.HierarchicalLearnedAgent`) query a trained policy outside
+    the AEC wrapper, using the exact same encoding path training used."""
     board = state.board
     static = _static_board_arrays(board)
 

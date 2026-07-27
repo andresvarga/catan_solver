@@ -80,15 +80,18 @@ Python/env overhead anyway (GPU wouldn't help there).
   policy head that replaced the flat one (action-type categorical, then
   pointer heads over stable vertex/edge/hex/resource/player IDs). This is the
   model everything below actually trains.
-- `training/ppo.py` / `training/hier_ppo.py` — self-play PPO for the flat and
-  hierarchical models respectively; `hier_ppo.py` also has fork-based
-  parallel rollout collection (`collect_rollout_parallel`, ~6-7x throughput
-  on a 16-core machine) and supports mixed-seat episodes (trainee vs. a
-  frozen league opponent occupying the other seats).
-- `training/train.py` / `training/train_hier.py` — single-policy training
-  CLIs (flat / hierarchical model), with curriculum flags, checkpointing,
-  and evaluation against both the fixed random/heuristic tiers and (in
-  `train_hier.py`) the current training-distribution settings.
+- `training/ppo.py` — shared GAE utility (`compute_gae`) used by
+  `training/hier_ppo.py`, the self-play/fine-tuning PPO loop for the
+  hierarchical and GNN models; it also has fork-based parallel rollout
+  collection (`collect_rollout_parallel`, ~6-7x throughput on a 16-core
+  machine) and supports mixed-seat episodes (trainee vs. a frozen league
+  opponent occupying the other seats). (The original flat-action-space model
+  and its PPO loop/CLI, `training/model.ActorCritic` and `training/train.py`,
+  were superseded by the pointer-based hierarchical model below and removed.)
+- `training/train_hier.py` — single-policy training CLI (hierarchical
+  model), with curriculum flags, checkpointing, and evaluation against both
+  the fixed random/heuristic tiers and the current training-distribution
+  settings.
 - `training/league.py` — `League`: a persisted population registry (roadmap
   phase 5) with TrueSkill ratings fed by each game's full finishing order,
   PFSP-style opponent sampling, and a pre-registered statistical promotion

@@ -1,23 +1,16 @@
-"""Flat-vector PPO baseline model (roadmap phase 4).
-
-Deliberately simple: every observation field is normalized and concatenated
-into one vector rather than encoding the board as a graph (§2's GNN encoder
-is phase 6 work, once curriculum stages start randomizing board layouts).
-On a *fixed* board -- which is what curriculum stage 1 uses -- a flat
-encoding is a reasonable v0: the design doc's own comparison table flags
-weak generalization across random layouts as the flat encoding's specific
-weakness, not "doesn't work at all."
+"""Flat-vector observation encoding shared by the hierarchical model
+(training/hier_model.py): every observation field is normalized and
+concatenated into one vector. The original flat-action-space PPO model that
+used to live here (`ActorCritic`, roadmap phase 4) was superseded by the
+pointer-based hierarchical/GNN models and removed; `flatten_observation`/
+`observation_dim` remain because the hierarchical model's trunk still
+consumes this same flat encoding.
 """
 from __future__ import annotations
 
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.distributions import Categorical
 
-from env.pettingzoo_env import MAX_ACTIONS, NUM_PLAYERS, PHASE_LIST
-
-NEG_INF = -1e9
+from env.pettingzoo_env import NUM_PLAYERS, PHASE_LIST
 
 
 def _onehot(index: int, n: int) -> np.ndarray:
@@ -71,47 +64,3 @@ def observation_dim(public_hand_features: bool = False) -> int:
     env.reset(seed=0)
     obs = env.observe(env.agent_selection)
     return flatten_observation(obs).shape[0]
-
-
-class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, action_dim: int = MAX_ACTIONS, hidden: int = 256):
-        super().__init__()
-        self.obs_dim = obs_dim
-        self.action_dim = action_dim
-        self.trunk = nn.Sequential(
-            nn.Linear(obs_dim, hidden), nn.Tanh(),
-            nn.Linear(hidden, hidden), nn.Tanh(),
-        )
-        self.policy_head = nn.Linear(hidden, action_dim)
-        self.value_head = nn.Linear(hidden, 1)
-
-    def forward(self, obs_batch: torch.Tensor, mask_batch: torch.Tensor):
-        features = self.trunk(obs_batch)
-        logits = self.policy_head(features)
-        logits = logits.masked_fill(mask_batch == 0, NEG_INF)
-        value = self.value_head(features).squeeze(-1)
-        return logits, value
-
-    def value(self, obs_batch: torch.Tensor) -> torch.Tensor:
-        """Value-only forward pass (no action sampling). Not used by the
-        training loop anymore -- truncation is treated as terminal in
-        compute_gae, so nothing bootstraps from it -- but kept as a cheap
-        utility for analysis and future centralized-critic work."""
-        features = self.trunk(obs_batch)
-        return self.value_head(features).squeeze(-1)
-
-    def act(self, obs_batch: torch.Tensor, mask_batch: torch.Tensor, deterministic: bool = False):
-        logits, value = self.forward(obs_batch, mask_batch)
-        dist = Categorical(logits=logits, validate_args=False)
-        action = torch.argmax(logits, dim=-1) if deterministic else dist.sample()
-        logprob = dist.log_prob(action)
-        entropy = dist.entropy()
-        return action, logprob, entropy, value
-
-    def evaluate_actions(self, obs_batch: torch.Tensor, mask_batch: torch.Tensor,
-                          actions: torch.Tensor):
-        logits, value = self.forward(obs_batch, mask_batch)
-        dist = Categorical(logits=logits, validate_args=False)
-        logprob = dist.log_prob(actions)
-        entropy = dist.entropy()
-        return logprob, entropy, value
