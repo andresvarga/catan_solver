@@ -37,12 +37,12 @@ The findings below describe the code **as audited** (`6e6949a`). Since then:
 | F-11 shortage exception | **Fixed** (single owed player takes the remainder) | `62fb8e9` |
 | F-10 adjacent 6/8 | **Fixed** for random and fixed boards (tokens re-dealt with the board's seeded rng) | `62fb8e9` |
 | Audit tests in default run | **Done**: `pytest.ini` runs `tests/` + `audit/tests/`; `pytest -m slow` runs the 1,200-game invariant fuzz | `62fb8e9` |
-| F-16 reward optimises rank | **Fixed**: default terminal reward is win/loss (+1 / −1/3 each), `rank` kept as an option | roadmap Phase 2 commit |
-| F-17 promotion unreachable | **Fixed**: ≥30% and significant vs parity 0.25 | roadmap Phase 2 commit |
-| Single fixed opponent (RL) | **Fixed**: `rl_finetune` trains vs a mixed pool (heuristic/honest/search/random/past checkpoints) with per-style win rates | roadmap Phase 2 commit |
-| Trade-bundle entropy | Averaged over the 10 bundle decisions | roadmap Phase 2 commit |
-| Diagnostics | PPO logs gradient norm and explained variance | roadmap Phase 2 commit |
-| F-09 hidden-info heuristic | `HonestHeuristicAgent` added (public-info only, equal strength); original kept as the eval baseline | roadmap Phase 2 commit |
+| F-16 reward optimises rank | **Fixed**: default terminal reward is win/loss (+1 / −1/3 each), `rank` kept as an option | `4e09954` |
+| F-17 promotion unreachable | **Fixed**: ≥30% and significant vs parity 0.25 | `4e09954` |
+| Single fixed opponent (RL) | **Fixed**: `rl_finetune` trains vs a mixed pool (heuristic/honest/search/random/past checkpoints) with per-style win rates | `4e09954` |
+| Trade-bundle entropy | Averaged over the 10 bundle decisions | `4e09954` |
+| Diagnostics | PPO logs gradient norm and explained variance | `4e09954` |
+| F-09 hidden-info heuristic | `HonestHeuristicAgent` added (public-info only, equal strength); original kept as the eval baseline | `4e09954` |
 | F-12, F-19, F-21, F-23–F-29 | Open | — |
 
 ## Executive Summary
