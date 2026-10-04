@@ -47,9 +47,10 @@ from training.graph_features import (
 )
 from env.state import NUM_PLAYERS
 from training.hier_model import (
-    ACTION_TYPES, ACTION_TYPE_INDEX, HEAD_NAMES, HEAD_SIZES, NEG_INF, NUM_ACTION_TYPES,
-    SUBMASK_PAD, TYPE_TO_HEADS, _pad, group_by_type, masked_sample, match_action,
-    prepare_transition_batch, stage1_mask, stage2_mask,
+    ACTION_TYPES, ACTION_TYPE_INDEX, HEAD_NAMES, HEAD_SIZES, NEG_INF, NO_TRADE_COUNTS,
+    NO_TRADE_MASKS, NUM_ACTION_TYPES, SUBMASK_PAD, TRADE_TYPES, TYPE_TO_HEADS, TradeCountHead,
+    _pad, decode_trade, group_by_type, masked_sample, match_action, prepare_transition_batch,
+    stage1_mask, stage2_mask, trade_logprob_entropy,
 )
 
 
@@ -161,6 +162,7 @@ class GraphActorCritic(nn.Module):
         self.resource_head = nn.Linear(hidden, 5)
         self.resource2_head = nn.Linear(hidden, 5)
         self.discard_index_head = nn.Linear(hidden, 100)
+        self.trade_head = TradeCountHead(hidden)
         self.value_head = nn.Linear(hidden, 1)
 
         # Auxiliary head (not used for acting or evaluate_actions -- see
@@ -308,8 +310,14 @@ class GraphActorCritic(nn.Module):
                 logprob += lp2
                 mask2_padded = _pad(mask2)
 
-        result_action = match_action(chosen_type, actions_of_type,
-                                      idx1 if idx1 != -1 else None, idx2 if idx2 != -1 else None)
+        trade_counts, trade_masks = NO_TRADE_COUNTS, NO_TRADE_MASKS
+        if chosen_type in TRADE_TYPES:
+            result_action, lp_t, trade_counts, trade_masks = decode_trade(
+                self.trade_head, features, actions_of_type[0], idx1, deterministic)
+            logprob += lp_t
+        else:
+            result_action = match_action(chosen_type, actions_of_type,
+                                          idx1 if idx1 != -1 else None, idx2 if idx2 != -1 else None)
         value = self.value_head(features).squeeze(0).squeeze(-1)
 
         head_data = {
@@ -317,6 +325,7 @@ class GraphActorCritic(nn.Module):
             "stage1_head": stage1_head, "stage2_head": stage2_head,
             "sub_mask_1": mask1_padded, "sub_idx_1": idx1,
             "sub_mask_2": mask2_padded, "sub_idx_2": idx2,
+            "trade_counts": trade_counts, "trade_masks": trade_masks,
         }
         return result_action, logprob, float(value.item()), head_data
 
@@ -357,4 +366,5 @@ class GraphActorCritic(nn.Module):
                 extra_logprob[rows] += dist.log_prob(sub_idxs)
                 extra_entropy[rows] += dist.entropy()
 
-        return logprob + extra_logprob, entropy + extra_entropy, value
+        trade_lp, trade_ent = trade_logprob_entropy(self.trade_head, features, tb)
+        return logprob + extra_logprob + trade_lp, entropy + extra_entropy + trade_ent, value

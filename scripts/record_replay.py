@@ -101,7 +101,8 @@ def action_label(a: Action) -> str:
     if t == ActionType.PROPOSE_TRADE:
         give = ",".join(f"{r.value}x{n}" for r, n in p["give"].items())
         want = ",".join(f"{r.value}x{n}" for r, n in p["want"].items())
-        return f"propose trade: {give} for {want}"
+        to = "all" if len(p["targets"]) > 1 else f"P{p['targets'][0]}"
+        return f"propose trade to {to}: {give} for {want}"
     if t == ActionType.COUNTER_TRADE:
         give = ",".join(f"{r.value}x{n}" for r, n in p["give"].items())
         want = ",".join(f"{r.value}x{n}" for r, n in p["want"].items())

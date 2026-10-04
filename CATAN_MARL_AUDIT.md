@@ -14,6 +14,25 @@ Labels: **CONFIRMED** (reproduced with a test or recorded seed), **LIKELY**, **P
 
 ---
 
+## Fix Status (updated 2026-10-04)
+
+The findings below describe the code **as audited** (`6e6949a`). Since then:
+
+| Finding | Status | Where |
+|---|---|---|
+| F-03 off-turn win | **Fixed**: only the turn owner can win; a player who reaches 10 VP on another player's turn wins at the start of their own turn | commit `537a79a` |
+| F-04 counter-offer invisible | **Fixed**: counter give/want/author in both encoders | `537a79a` |
+| F-06 truncation pays a win | **Fixed**: 0 reward + V(s_T) bootstrap by default; step caps default 4000 | `537a79a` |
+| F-07 no pre-roll dev cards | **Fixed** | `537a79a` |
+| F-08 Road Building lock | **Fixed** (unplaceable free roads are forfeited) | `537a79a` |
+| F-14 seat-0-only eval | **Fixed**: seat rotated by seed, Wilson CIs printed | `537a79a` |
+| F-15 short credit horizon | **Fixed**: γ=0.999, λ=0.98, forced moves not stored | `537a79a` |
+| F-18 lost runs | **Mitigated**: `manifest.json` per run (old artifacts unrecoverable) | `537a79a` |
+| F-20 1:1-only trading | **Fixed (bounded variant)**: 1-3 cards per side, targeted or broadcast, multi-card counters, 4 proposals/turn, structured actions + autoregressive bundle head | working tree (uncommitted) |
+| F-13 ACCEPT without paying | **Fixed** as part of F-20 | working tree |
+| F-05 no step validation | **Partly fixed**: `CatanEngine.step` and `CatanAECEnv.step` validate; raw `engine.step` stays unchecked for simulation speed | working tree |
+| F-01, F-02, F-10, F-11, F-12, F-16, F-17, F-19, F-21–F-29 | Open | — |
+
 ## Executive Summary
 
 **Overall:** the engine is much better than most hobby Catan simulators. Information hiding is clean, action

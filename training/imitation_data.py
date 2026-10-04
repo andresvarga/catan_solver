@@ -16,6 +16,7 @@ import torch
 
 LABEL_KEYS = ("type_mask", "type_idx", "head1_id", "sub_mask_1", "sub_idx_1",
               "head2_id", "sub_mask_2", "sub_idx_2")
+OPTIONAL_LABEL_KEYS = ("trade_counts", "trade_masks")
 OBS_PREFIX = "obs_"
 
 
@@ -38,7 +39,10 @@ def batch_obs(data: dict[str, torch.Tensor], idx: torch.Tensor, device):
 
 
 def batch_labels(data: dict[str, torch.Tensor], idx: torch.Tensor, device) -> dict[str, torch.Tensor]:
-    return {k: data[k][idx].to(device) for k in LABEL_KEYS}
+    """Label tensors for a minibatch. The structured-trade labels
+    (trade_counts/trade_masks) are optional so datasets recorded before
+    structured trades still load (they then carry no trade-bundle term)."""
+    return {k: data[k][idx].to(device) for k in LABEL_KEYS + OPTIONAL_LABEL_KEYS if k in data}
 
 
 def model_features(model, obs_batch):

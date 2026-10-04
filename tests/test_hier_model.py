@@ -6,9 +6,10 @@ import torch
 from agents.random_agent import choose as random_choose
 from env.actions import Action, ActionType
 from env.board import Resource
-from env.engine import CatanEngine, legal_actions
+from env.engine import ALL_OPPONENTS, CatanEngine, is_legal_action, legal_actions, make_trade
 from env.pettingzoo_env import CatanAECEnv, build_observation
 from env.state import DevCard, Phase, new_game
+from training.hier_model import PLAYER_SIZE, RESOURCE_LIST, TRADE_TYPES, trade_head_data
 from training.agent import HierarchicalLearnedAgent, load_hier_model
 from training.hier_model import (
     HierarchicalActorCritic, action_to_indices, group_by_type, match_action, stage1_mask, stage2_mask,
@@ -32,7 +33,7 @@ def test_act_always_returns_a_legal_action_across_many_phases():
         obs = build_observation(engine.state, actor, acts, show_mask=True)
         flat = torch.tensor(flatten_observation(obs), dtype=torch.float32).unsqueeze(0)
         action, logprob, value, head_data = model.act(flat, acts, deterministic=(steps % 2 == 0))
-        assert action in acts
+        assert is_legal_action(engine.state, action)
         engine.step(action)
         steps += 1
 
@@ -136,13 +137,18 @@ def test_maritime_and_propose_and_confirm_trade_round_trip():
     assert matched == a
 
     propose = [a for a in acts if a.type == ActionType.PROPOSE_TRADE]
-    assert propose
-    a = propose[0]
-    give_r = next(iter(a.params["give"]))
-    want_r = next(iter(a.params["want"]))
-    i1, i2 = RESOURCE_LIST.index(give_r), RESOURCE_LIST.index(want_r)
-    matched = match_action(ActionType.PROPOSE_TRADE, propose, i1, i2)
-    assert matched == a
+    assert len(propose) == 1 and propose[0].params["template"]  # structured: one template
+    template = propose[0]
+    trade = make_trade(ActionType.PROPOSE_TRADE, {Resource.WOOD: 2}, {Resource.ORE: 1}, actor=0, target=2)
+    assert is_legal_action(state, trade)
+    mask1 = stage1_mask(ActionType.PROPOSE_TRADE, propose)
+    assert mask1.tolist() == [0.0, 1.0, 1.0, 1.0, 1.0]  # opponents 1-3 + "all"
+    idx1, _ = action_to_indices(ActionType.PROPOSE_TRADE, propose, trade)
+    assert idx1 == 2
+    counts, masks = trade_head_data(template, trade)
+    assert counts.tolist() == [2, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    assert masks[0].tolist() == [0, 1, 1, 1]  # only wood held: must give 1-3 wood
+    assert masks[5].tolist() == [1, 0, 0, 0]  # can't want wood while giving it
 
 
 def test_discard_index_head_round_trips():
@@ -261,7 +267,19 @@ def test_action_to_indices_is_the_exact_inverse_of_match_action():
             by_type.setdefault(a.type, []).append(a)
         actions_of_type = by_type[chosen.type]
         idx1, idx2 = action_to_indices(chosen.type, actions_of_type, chosen)
-        reconstructed = match_action(chosen.type, actions_of_type, idx1, idx2)
+        if chosen.type in TRADE_TYPES:
+            # structured trade: target index + bundle counts must rebuild it exactly
+            counts, masks = trade_head_data(actions_of_type[0], chosen)
+            assert all(masks[k, c] == 1.0 for k, c in enumerate(counts))
+            give = {RESOURCE_LIST[i]: int(c) for i, c in enumerate(counts[:5]) if c}
+            want = {RESOURCE_LIST[i]: int(c) for i, c in enumerate(counts[5:]) if c}
+            if chosen.type == ActionType.PROPOSE_TRADE:
+                target = ALL_OPPONENTS if idx1 == PLAYER_SIZE - 1 else idx1
+                reconstructed = make_trade(chosen.type, give, want, actor=state.current_player, target=target)
+            else:
+                reconstructed = make_trade(chosen.type, give, want)
+        else:
+            reconstructed = match_action(chosen.type, actions_of_type, idx1, idx2)
         assert reconstructed == chosen, f"{chosen.type}: {reconstructed} != {chosen}"
         seen_types.add(chosen.type)
         engine.step(chosen)

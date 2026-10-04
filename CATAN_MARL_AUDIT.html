@@ -105,7 +105,7 @@ a.fref{font-weight:600; white-space:nowrap}
 </head>
 <body>
 <div class="layout">
-<nav class="toc" aria-label="Contents"><details id="tocd" open><summary>Contents</summary><ol><li><a href="#executive-summary">Executive Summary</a></li><li><a href="#critical-findings-p0">Critical Findings</a></li><li><a href="#high-priority-findings-p1">High-Priority Findings</a></li><li><a href="#medium-findings-p2">Medium Findings</a></li><li><a href="#low-priority-findings-p3">Low-Priority Findings</a></li><li><a href="#architecture-overview">Architecture Overview</a></li><li><a href="#catan-rules-coverage">Catan Rules Coverage</a></li><li><a href="#observation-space-audit">Observation-Space Audit</a></li><li><a href="#action-space-audit">Action-Space Audit</a></li><li><a href="#reward-audit">Reward Audit</a></li><li><a href="#marl-algorithm-audit">MARL Algorithm Audit</a></li><li><a href="#self-play-audit">Self-Play Audit</a></li><li><a href="#controlled-mini-training-experiment-checkpoint-ladder-phases-31-40">Controlled Mini Training Experiment &amp; Checkpoint Ladder</a></li><li><a href="#evaluation-audit">Evaluation Audit</a></li><li><a href="#performance-results">Performance Results</a></li><li><a href="#testing-results">Testing Results</a></li><li><a href="#reproducibility-results">Reproducibility Results</a></li><li><a href="#exploitability-reward-hacking-risks">Exploitability / Reward-Hacking Risks</a></li><li><a href="#known-simplifications-from-standard-catan">Known Simplifications From Standard Catan</a></li><li><a href="#recommended-fixes">Recommended Fixes</a></li><li><a href="#recommended-new-tests">Recommended New Tests</a></li><li><a href="#recommended-training-improvements">Recommended Training Improvements</a></li><li><a href="#recommended-evaluation-protocol">Recommended Evaluation Protocol</a></li><li><a href="#roadmap">Roadmap</a></li><li><a href="#answers-to-the-25-questions">Answers to the 25 Questions</a></li></ol></details></nav>
+<nav class="toc" aria-label="Contents"><details id="tocd" open><summary>Contents</summary><ol><li><a href="#fix-status-updated-2026-10-04">Fix Status</a></li><li><a href="#executive-summary">Executive Summary</a></li><li><a href="#critical-findings-p0">Critical Findings</a></li><li><a href="#high-priority-findings-p1">High-Priority Findings</a></li><li><a href="#medium-findings-p2">Medium Findings</a></li><li><a href="#low-priority-findings-p3">Low-Priority Findings</a></li><li><a href="#architecture-overview">Architecture Overview</a></li><li><a href="#catan-rules-coverage">Catan Rules Coverage</a></li><li><a href="#observation-space-audit">Observation-Space Audit</a></li><li><a href="#action-space-audit">Action-Space Audit</a></li><li><a href="#reward-audit">Reward Audit</a></li><li><a href="#marl-algorithm-audit">MARL Algorithm Audit</a></li><li><a href="#self-play-audit">Self-Play Audit</a></li><li><a href="#controlled-mini-training-experiment-checkpoint-ladder-phases-31-40">Controlled Mini Training Experiment &amp; Checkpoint Ladder</a></li><li><a href="#evaluation-audit">Evaluation Audit</a></li><li><a href="#performance-results">Performance Results</a></li><li><a href="#testing-results">Testing Results</a></li><li><a href="#reproducibility-results">Reproducibility Results</a></li><li><a href="#exploitability-reward-hacking-risks">Exploitability / Reward-Hacking Risks</a></li><li><a href="#known-simplifications-from-standard-catan">Known Simplifications From Standard Catan</a></li><li><a href="#recommended-fixes">Recommended Fixes</a></li><li><a href="#recommended-new-tests">Recommended New Tests</a></li><li><a href="#recommended-training-improvements">Recommended Training Improvements</a></li><li><a href="#recommended-evaluation-protocol">Recommended Evaluation Protocol</a></li><li><a href="#roadmap">Roadmap</a></li><li><a href="#answers-to-the-25-questions">Answers to the 25 Questions</a></li></ol></details></nav>
 <main>
 <header class="hero">
 <button class="theme-btn" id="theme" type="button">Dark mode</button>
@@ -122,7 +122,80 @@ Every confirmed bug has a strict-xfail test that reproduces it and will flip whe
 <hr /></div>
 <div class="counts"><div class="count sev-p0"><b>0</b><span>P0</span></div><div class="count sev-p1"><b>8</b><span>P1</span></div><div class="count sev-p2"><b>14</b><span>P2</span></div><div class="count sev-p3"><b>7</b><span>P3</span></div></div>
 </header>
-<section class="card"><h2 id="executive-summary">Executive Summary</h2>
+<section class="card"><h2 id="fix-status-updated-2026-10-04">Fix Status (updated 2026-10-04)</h2>
+<p>The findings below describe the code <strong>as audited</strong> (<code>6e6949a</code>). Since then:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Finding</th>
+<th>Status</th>
+<th>Where</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a class="fref" href="#f-03">F-03</a> off-turn win</td>
+<td><strong>Fixed</strong>: only the turn owner can win; a player who reaches 10 VP on another player's turn wins at the start of their own turn</td>
+<td>commit <code>537a79a</code></td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-04">F-04</a> counter-offer invisible</td>
+<td><strong>Fixed</strong>: counter give/want/author in both encoders</td>
+<td><code>537a79a</code></td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-06">F-06</a> truncation pays a win</td>
+<td><strong>Fixed</strong>: 0 reward + V(s_T) bootstrap by default; step caps default 4000</td>
+<td><code>537a79a</code></td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-07">F-07</a> no pre-roll dev cards</td>
+<td><strong>Fixed</strong></td>
+<td><code>537a79a</code></td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-08">F-08</a> Road Building lock</td>
+<td><strong>Fixed</strong> (unplaceable free roads are forfeited)</td>
+<td><code>537a79a</code></td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-14">F-14</a> seat-0-only eval</td>
+<td><strong>Fixed</strong>: seat rotated by seed, Wilson CIs printed</td>
+<td><code>537a79a</code></td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-15">F-15</a> short credit horizon</td>
+<td><strong>Fixed</strong>: γ=0.999, λ=0.98, forced moves not stored</td>
+<td><code>537a79a</code></td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-18">F-18</a> lost runs</td>
+<td><strong>Mitigated</strong>: <code>manifest.json</code> per run (old artifacts unrecoverable)</td>
+<td><code>537a79a</code></td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-20">F-20</a> 1:1-only trading</td>
+<td><strong>Fixed (bounded variant)</strong>: 1-3 cards per side, targeted or broadcast, multi-card counters, 4 proposals/turn, structured actions + autoregressive bundle head</td>
+<td>working tree (uncommitted)</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-13">F-13</a> ACCEPT without paying</td>
+<td><strong>Fixed</strong> as part of <a class="fref" href="#f-20">F-20</a></td>
+<td>working tree</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-05">F-05</a> no step validation</td>
+<td><strong>Partly fixed</strong>: <code>CatanEngine.step</code> and <code>CatanAECEnv.step</code> validate; raw <code>engine.step</code> stays unchecked for simulation speed</td>
+<td>working tree</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-01">F-01</a>, <a class="fref" href="#f-02">F-02</a>, <a class="fref" href="#f-10">F-10</a>, <a class="fref" href="#f-11">F-11</a>, <a class="fref" href="#f-12">F-12</a>, <a class="fref" href="#f-16">F-16</a>, <a class="fref" href="#f-17">F-17</a>, <a class="fref" href="#f-19">F-19</a>, <a class="fref" href="#f-21">F-21</a>–<a class="fref" href="#f-29">F-29</a></td>
+<td>Open</td>
+<td>—</td>
+</tr>
+</tbody>
+</table></div>
+</section><section class="card"><h2 id="executive-summary">Executive Summary</h2>
 <p><strong>Overall:</strong> the engine is much better than most hobby Catan simulators. Information hiding is clean, action
 masking is airtight, and Longest Road is correct (checked against an independent oracle on ~52,000 networks).
 I found no P0 issue: nothing lets the agent see hidden information, take an illegal action through the policy,

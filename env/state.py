@@ -13,7 +13,8 @@ STARTING_ROADS = 15
 WINNING_VP = 10
 MIN_LONGEST_ROAD = 5
 MIN_LARGEST_ARMY = 3
-MAX_TRADE_PROPOSALS_PER_TURN = 2  # engine-level negotiation-efficiency bound; see engine.py legal_actions
+MAX_TRADE_PROPOSALS_PER_TURN = 4  # engine-level negotiation-efficiency bound (rule variant); see engine.py
+MAX_TRADE_CARDS_PER_SIDE = 3  # domestic trade bundles: 1-3 cards given, 1-3 cards wanted (rule variant)
 
 
 class DevCard(Enum):

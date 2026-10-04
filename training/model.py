@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 
 from env.pettingzoo_env import NUM_PLAYERS, PHASE_LIST
+from env.state import MAX_TRADE_PROPOSALS_PER_TURN
 
 
 def _onehot(index: int, n: int) -> np.ndarray:
@@ -52,6 +53,8 @@ def flatten_observation(obs: dict) -> np.ndarray:
         obs["counter_trade_give"].astype(np.float32) / 19.0,
         obs["counter_trade_want"].astype(np.float32) / 19.0,
         _onehot(int(obs["counter_trade_proposer"][0]) + 1, NUM_PLAYERS + 1),
+        obs["pending_trade_targets"].astype(np.float32),
+        obs["trades_proposed_this_turn"].astype(np.float32) / MAX_TRADE_PROPOSALS_PER_TURN,
     ]
     # Optional card-counting features (env's `public_hand_features` flag):
     # keyed on presence so the same encoder serves both observation layouts.

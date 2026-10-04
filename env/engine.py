@@ -7,8 +7,12 @@ variants worth flagging explicitly:
 - dev cards may be played before rolling (ROLL phase) or after (MAIN), as
   in the official rules; Road Building's roads are placed immediately, and
   any that cannot be placed are forfeited.
-- domestic-trade bundle enumeration in `legal_actions` is capped to keep the
-  reference action list finite -- `step` itself accepts any give/want dict.
+- domestic trades are *structured*: `legal_actions` lists one template
+  Action per trade type (PROPOSE_TRADE / COUNTER_TRADE with
+  params {"template": True, ...}) instead of enumerating every bundle; the
+  agent builds a concrete give/want bundle (1-`MAX_TRADE_CARDS_PER_SIDE`
+  cards each side, disjoint resources, addressed to one opponent or all) and
+  `is_legal_action` validates it. Templates themselves are not steppable.
 - PROPOSE_TRADE is capped at `MAX_TRADE_PROPOSALS_PER_TURN` (state.py) per
   player per turn. This is a deliberate rule variant, not standard Catan: a
   trained policy that hasn't yet learned when to stop negotiating can
@@ -27,7 +31,8 @@ from itertools import combinations_with_replacement
 from env.actions import Action, ActionType
 from env.board import Resource
 from env.state import (
-    BUILDING_COSTS, DevCard, GameState, MAX_TRADE_PROPOSALS_PER_TURN, MIN_LARGEST_ARMY,
+    BUILDING_COSTS, DevCard, GameState, MAX_TRADE_CARDS_PER_SIDE, MAX_TRADE_PROPOSALS_PER_TURN,
+    MIN_LARGEST_ARMY,
     MIN_LONGEST_ROAD, NUM_PLAYERS, Phase, STARTING_CITIES, STARTING_ROADS, STARTING_SETTLEMENTS,
     TradeOffer, WINNING_VP, empty_hand, new_game,
 )
@@ -442,21 +447,21 @@ def legal_actions(state: GameState) -> list[Action]:
 
     if state.phase == Phase.TRADE_RESPONSE:
         if state.trade_counter_context is not None:
-            actions.append(Action(ActionType.ACCEPT_TRADE, {}))
+            # original proposer decides on the counter; accepting is only
+            # possible if they can pay what the counter asks for
+            ctx = state.trade_counter_context
+            if has_resources(state.players[actor].resources, ctx.want):
+                actions.append(Action(ActionType.ACCEPT_TRADE, {}))
             actions.append(Action(ActionType.REJECT_TRADE, {}))
             return actions
         if state.trade_targets_remaining:
-            actions.append(Action(ActionType.ACCEPT_TRADE, {}))
-            actions.append(Action(ActionType.REJECT_TRADE, {}))
             offer = state.pending_trade
             hand = state.players[actor].resources
-            for give_r in Resource:
-                if hand.get(give_r, 0) >= 1:
-                    for want_r in Resource:
-                        if want_r == give_r:
-                            continue
-                        actions.append(Action(ActionType.COUNTER_TRADE,
-                                               {"give": {give_r: 1}, "want": {want_r: 1}}))
+            if has_resources(hand, offer.want):  # can only accept what you can pay
+                actions.append(Action(ActionType.ACCEPT_TRADE, {}))
+            actions.append(Action(ActionType.REJECT_TRADE, {}))
+            if sum(hand.values()) > 0:
+                actions.append(trade_template(state, actor, ActionType.COUNTER_TRADE))
             return actions
         # proposer confirms one of the accepted offers, or cancels
         for target in state.trade_accepted:
@@ -499,15 +504,9 @@ def legal_actions(state: GameState) -> list[Action]:
                                 actions.append(Action(ActionType.MARITIME_TRADE,
                                                        {"give": give_r, "receive": want_r}))
 
-                if state.trades_proposed_this_turn < MAX_TRADE_PROPOSALS_PER_TURN:
-                    others = [p for p in state.players if p != actor]
-                    for give_r in Resource:
-                        if hand.get(give_r, 0) >= 1:
-                            for want_r in Resource:
-                                if want_r != give_r:
-                                    actions.append(Action(ActionType.PROPOSE_TRADE,
-                                                           {"give": {give_r: 1}, "want": {want_r: 1},
-                                                            "targets": others}))
+                if state.trades_proposed_this_turn < MAX_TRADE_PROPOSALS_PER_TURN \
+                        and sum(hand.values()) > 0:
+                    actions.append(trade_template(state, actor, ActionType.PROPOSE_TRADE))
 
         actions.extend(_dev_card_play_actions(state, actor))
         actions.append(Action(ActionType.END_TURN))
@@ -565,6 +564,117 @@ def _settle_free_roads(state: GameState, actor: int) -> None:
 # Step
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Structured domestic trades
+# --------------------------------------------------------------------------
+
+TRADE_TYPES = (ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE)
+ALL_OPPONENTS = "all"
+
+
+def trade_template(state: GameState, actor: int, kind: ActionType) -> Action:
+    """The single legal-list entry standing in for every concrete bundle of
+    `kind`. Carries what a bundle builder needs: the actor's own hand (its
+    own private info) and, for proposals, who it may be addressed to."""
+    params = {"template": True, "actor": actor,
+              "hand": {r: k for r, k in state.players[actor].resources.items()}}
+    if kind == ActionType.PROPOSE_TRADE:
+        params["target_options"] = opponents_in_turn_order(actor) + [ALL_OPPONENTS]
+    return Action(kind, params)
+
+
+def is_template(action: Action) -> bool:
+    return bool(action.params.get("template"))
+
+
+def opponents_in_turn_order(pid: int) -> list[int]:
+    return [(pid + k) % NUM_PLAYERS for k in range(1, NUM_PLAYERS)]
+
+
+def trade_bundle_ok(hand: dict[Resource, int], give: dict, want: dict) -> bool:
+    """1..MAX_TRADE_CARDS_PER_SIDE cards each side, non-negative integer
+    counts, no resource on both sides (no like-for-like swaps or gifts), and
+    the giver actually holds `give`."""
+    if not all(isinstance(r, Resource) and isinstance(k, int) and not isinstance(k, bool) and k >= 0
+               for side in (give, want) for r, k in side.items()):
+        return False
+    g = {r: k for r, k in give.items() if k}
+    w = {r: k for r, k in want.items() if k}
+    if not (1 <= sum(g.values()) <= MAX_TRADE_CARDS_PER_SIDE):
+        return False
+    if not (1 <= sum(w.values()) <= MAX_TRADE_CARDS_PER_SIDE):
+        return False
+    if set(g) & set(w):
+        return False
+    return has_resources(hand, g)
+
+
+def make_trade(kind: ActionType, give: dict, want: dict, actor: int | None = None,
+               target: int | str | None = None) -> Action:
+    """Build a concrete trade Action. PROPOSE_TRADE needs `actor` and a
+    `target` (an opponent id or ALL_OPPONENTS); COUNTER_TRADE has none (it
+    always goes back to the proposer)."""
+    params = {"give": {r: k for r, k in give.items() if k},
+              "want": {r: k for r, k in want.items() if k}}
+    if kind == ActionType.PROPOSE_TRADE:
+        params["targets"] = opponents_in_turn_order(actor) if target == ALL_OPPONENTS else [target]
+    return Action(kind, params)
+
+
+def _concrete_trade_legal(state: GameState, action: Action) -> bool:
+    if state.phase == Phase.GAME_OVER:
+        return False
+    actor = acting_player(state)
+    p = action.params
+    if not isinstance(p.get("give"), dict) or not isinstance(p.get("want"), dict):
+        return False
+    hand = state.players[actor].resources
+    if action.type == ActionType.PROPOSE_TRADE:
+        if state.phase != Phase.MAIN or state.free_roads_remaining > 0 or not state.allow_trading:
+            return False
+        if state.trades_proposed_this_turn >= MAX_TRADE_PROPOSALS_PER_TURN:
+            return False
+        targets = p.get("targets")
+        opps = opponents_in_turn_order(actor)
+        if not isinstance(targets, list) or not (targets == opps or (len(targets) == 1 and targets[0] in opps)):
+            return False
+        return trade_bundle_ok(hand, p["give"], p["want"])
+    # COUNTER_TRADE: a responder still owing a reply to the original offer
+    if state.phase != Phase.TRADE_RESPONSE or state.trade_counter_context is not None \
+            or not state.trade_targets_remaining:
+        return False
+    return trade_bundle_ok(hand, p["give"], p["want"])
+
+
+def is_legal_action(state: GameState, action: Action) -> bool:
+    """Single legality oracle: concrete trades are validated structurally,
+    everything else must appear in `legal_actions(state)`. Templates are
+    never steppable."""
+    if is_template(action):
+        return False
+    if action.type in TRADE_TYPES:
+        return _concrete_trade_legal(state, action)
+    return action in legal_actions(state)
+
+
+def random_trade(template: Action, rng: random.Random, actor: int | None = None) -> Action:
+    """A random legal bundle for `template` (random agent, fuzzing)."""
+    hand = template.params["hand"]
+    pool = [r for r, k in hand.items() for _ in range(min(k, MAX_TRADE_CARDS_PER_SIDE))]
+    n_give = rng.randint(1, min(MAX_TRADE_CARDS_PER_SIDE, len(pool)))
+    give: dict[Resource, int] = {}
+    for r in rng.sample(pool, n_give):
+        give[r] = give.get(r, 0) + 1
+    rest = [r for r in Resource if r not in give]
+    want: dict[Resource, int] = {}
+    for _ in range(rng.randint(1, MAX_TRADE_CARDS_PER_SIDE)):
+        r = rng.choice(rest)
+        want[r] = want.get(r, 0) + 1
+    target = rng.choice(template.params["target_options"]) \
+        if template.type == ActionType.PROPOSE_TRADE else None
+    return make_trade(template.type, give, want, actor=actor, target=target)
+
+
 def _begin_discard_or_robber(state: GameState) -> None:
     to_discard = [pid for pid, p in state.players.items() if p.hand_size() > 7]
     if to_discard:
@@ -608,6 +718,9 @@ def _execute_trade(state: GameState, giver: int, receiver: int,
 def step(state: GameState, action: Action, rng: random.Random | None = None) -> None:
     if rng is None:
         rng = random.Random()
+    if is_template(action):
+        raise ValueError(f"{action.type.value} template is not steppable -- build a concrete "
+                         "bundle (engine.make_trade) instead")
     actor = acting_player(state)
     t = action.type
     p = action.params
@@ -786,7 +899,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
 
     if t == ActionType.PROPOSE_TRADE:
         state.trades_proposed_this_turn += 1
-        state.pending_trade = TradeOffer(proposer=actor, give=p["give"], want=p["want"],
+        state.pending_trade = TradeOffer(proposer=actor, give=dict(p["give"]), want=dict(p["want"]),
                                           targets=list(p["targets"]))
         state.trade_targets_remaining = list(p["targets"])
         state.trade_accepted = []
@@ -897,7 +1010,12 @@ class CatanEngine:
     def legal_actions(self) -> list[Action]:
         return legal_actions(self.state)
 
-    def step(self, action: Action) -> None:
+    def step(self, action: Action, validate: bool = True) -> None:
+        """`validate` (default on) rejects illegal actions with ValueError
+        before anything is mutated; the module-level `step` stays unchecked
+        for hot simulation loops that only ever feed it legal actions."""
+        if validate and not is_legal_action(self.state, action):
+            raise ValueError(f"illegal action {action!r} in phase {self.state.phase.name}")
         step(self.state, action, rng=self.rng)
 
     @property

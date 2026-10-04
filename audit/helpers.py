@@ -286,3 +286,16 @@ def closed_nbhd(board, verts) -> set[int]:
     for v in verts:
         out |= set(board.vertices[v].adjacent_vertex_ids)
     return out
+
+
+def random_env_index(env, rng: random.Random) -> int:
+    """Uniform random *index* action (trade templates excluded -- they are
+    submitted as concrete Actions, not indices)."""
+    from env.engine import is_template
+    return rng.choice([i for i, a in enumerate(env.legal_actions()) if not is_template(a)])
+
+
+def random_engine_action(state, rng: random.Random):
+    """Random legal concrete action, expanding trade templates."""
+    from agents.random_agent import choose
+    return choose(state, rng)

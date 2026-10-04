@@ -165,8 +165,9 @@ def test_counter_offer_terms_visible_to_proposer():
     for give_r in (Resource.ORE, Resource.SHEEP):
         s = fresh_main_state(13_100_002)
         give(s, 0, wood=1); give(s, 1, ore=1, sheep=1)
-        step(s, next(a for a in legal_actions(s) if a.type == ActionType.PROPOSE_TRADE
-                     and Resource.WOOD in a.params["give"] and Resource.BRICK in a.params["want"]))
+        from env.engine import make_trade
+        step(s, make_trade(ActionType.PROPOSE_TRADE, {Resource.WOOD: 1}, {Resource.BRICK: 1},
+                           actor=0, target=1))
         step(s, Action(ActionType.COUNTER_TRADE, {"give": {give_r: 1}, "want": {Resource.WOOD: 1}}))
         obs.append(obs_all(s, 0, True))
     with pytest.raises(AssertionError):

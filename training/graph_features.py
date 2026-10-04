@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from env.board import HEX_TO_RESOURCE, PIP_COUNT, HexType, Resource
-from env.state import DevCard, GameState, Phase
+from env.state import DevCard, GameState, MAX_TRADE_PROPOSALS_PER_TURN, Phase
 
 RESOURCE_LIST = list(Resource)
 DEV_CARD_LIST = list(DevCard)
@@ -32,7 +32,9 @@ OPPONENT_FEAT_DIM = 9
 # publicly-inferable resource estimate (5) + unknown-identity card count (1).
 PUBLIC_HAND_FEAT_DIM = 6
 NUM_OPPONENTS = 3
-CONTEXT_FEAT_DIM = 40  # phase(8) dice(2) pending give/want(10) + proposer(5) | counter give/want(10) + proposer(5)
+# phase(8) dice(2) | pending give/want(10) + proposer(5) | counter give/want(10) + proposer(5)
+# | pending targets, relative seats me/+1/+2/+3 (4) | proposals used this turn (1)
+CONTEXT_FEAT_DIM = 45
 SELF_ID_DIM = 4  # one-hot of the observing player's absolute seat (0-3)
 
 
@@ -181,6 +183,10 @@ def build_graph_observation(state: GameState, pid: int,
         context_features[35:40] = _relative_seat_onehot(ctr.proposer, pid)
     else:
         context_features[35] = 1.0
+    if state.pending_trade is not None:
+        for t in state.pending_trade.targets:
+            context_features[40 + (t - pid) % 4] = 1.0
+    context_features[44] = state.trades_proposed_this_turn / MAX_TRADE_PROPOSALS_PER_TURN
 
     # Absolute seat of the observing player -- used only as a deterministic
     # index (never a learned input) to map the GNN's seat-relative opponent

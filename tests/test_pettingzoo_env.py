@@ -8,12 +8,21 @@ from env.pettingzoo_env import CatanAECEnv
 from env.state import Phase
 
 
-def _weighted_masked_choice(mask: np.ndarray, legal_actions, rng: random.Random) -> int:
+def _weighted_masked_choice(mask: np.ndarray, legal_actions, rng: random.Random):
+    """An index for ordinary actions, or -- when a trade template is picked
+    -- a random concrete trade Action (structured trades are submitted as
+    Actions, not indices; templates are 0 in the mask)."""
     from env.actions import ActionType
-    idxs = [i for i in range(len(legal_actions))]
+    from env.engine import is_template, random_trade
+    idxs = list(range(len(legal_actions)))
     weights = [0.05 if legal_actions[i].type in
                (ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE) else 1.0 for i in idxs]
-    return rng.choices(idxs, weights=weights, k=1)[0]
+    i = rng.choices(idxs, weights=weights, k=1)[0]
+    if is_template(legal_actions[i]):
+        assert mask[i] == 0
+        return random_trade(legal_actions[i], rng, actor=legal_actions[i].params["actor"])
+    assert mask[i] == 1
+    return i
 
 
 def test_full_random_game_via_agent_iter():
@@ -58,7 +67,10 @@ def test_action_mask_matches_legal_action_count():
     env = CatanAECEnv(randomize_board=True, seed=2)
     env.reset(seed=2)
     obs = env.observe(env.agent_selection)
-    assert obs["action_mask"].sum() == len(env.legal_actions())
+    from env.engine import is_template
+    legal = env.legal_actions()
+    assert obs["action_mask"].sum() == sum(not is_template(a) for a in legal)
+    assert all(obs["action_mask"][i] == (0 if is_template(a) else 1) for i, a in enumerate(legal))
 
 
 def test_pettingzoo_api_compliance():
@@ -109,7 +121,7 @@ def test_clear_reward_gives_reward_since_last_asked_to_act():
         if not env.agents:
             break
         obs, reward, terminated, truncated, info = env.last()
-        action = None if (terminated or truncated) else rng.randrange(len(env.legal_actions()))
+        action = None if (terminated or truncated) else int(rng.choice(list(np.flatnonzero(obs["action_mask"]))))
         env.step(action)
 
     # clear_reward on an agent not yet tracked (already removed) must be a no-op, not an error.
@@ -123,7 +135,7 @@ def test_max_episode_steps_truncates_and_drains():
     steps = 0
     for agent in env.agent_iter(max_iter=1000):
         obs, reward, terminated, truncated, info = env.last()
-        action = None if (terminated or truncated) else rng.randrange(len(env.legal_actions()))
+        action = None if (terminated or truncated) else int(rng.choice(list(np.flatnonzero(obs["action_mask"]))))
         env.step(action)
         steps += 1
         if steps > 200:
@@ -180,7 +192,7 @@ def test_vp_shaping_rewards_are_nonzero_when_enabled():
         obs, reward, terminated, truncated, info = env.last()
         if reward != 0:
             saw_nonzero = True
-        action = None if (terminated or truncated) else rng.randrange(len(env.legal_actions()))
+        action = None if (terminated or truncated) else int(rng.choice(list(np.flatnonzero(obs["action_mask"]))))
         env.step(action)
         if i > 600:
             break
@@ -206,8 +218,9 @@ def test_counter_offer_is_observable_to_proposer():
     s.players[p0].resources[Resource.WOOD] += 1
     responder = (p0 + 1) % 4
     s.players[responder].resources[Resource.ORE] += 1
-    step(s, next(a for a in legal_actions(s) if a.type == ActionType.PROPOSE_TRADE
-                 and Resource.WOOD in a.params["give"]))
+    from env.engine import make_trade
+    step(s, make_trade(ActionType.PROPOSE_TRADE, {Resource.WOOD: 1}, {Resource.BRICK: 1},
+                       actor=p0, target=responder))
     step(s, Action(ActionType.COUNTER_TRADE, {"give": {Resource.ORE: 1}, "want": {Resource.WOOD: 1}}))
     obs = build_observation(s, p0, legal_actions(s), True)
     assert obs["counter_trade_give"].tolist() == [0, 0, 0, 0, 1]

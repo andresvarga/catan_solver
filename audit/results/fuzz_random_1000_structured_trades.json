@@ -1,0 +1,94 @@
+{
+ "games": 1000,
+ "agent": "random",
+ "seed_base": 15000000,
+ "seconds": 28.5,
+ "finished": 1000,
+ "total_steps": 1117391,
+ "games_with_violation_kind": {
+  "bank[sheep]": 1,
+  "bank[wheat]": 3,
+  "bank[ore]": 3,
+  "bank[wood]": 2
+ },
+ "first_violation": {
+  "bank[sheep]": {
+   "msg": "bank[sheep]=-1 < 0",
+   "seed": 15000048,
+   "step": 963,
+   "action": "maritime_trade({'give': <Resource.WHEAT: 'wheat'>, 'receive': <Resource.SHEEP: 'sheep'>})"
+  },
+  "bank[wheat]": {
+   "msg": "bank[wheat]=-1 < 0",
+   "seed": 15000212,
+   "step": 1839,
+   "action": "maritime_trade({'give': <Resource.ORE: 'ore'>, 'receive': <Resource.WHEAT: 'wheat'>})"
+  },
+  "bank[ore]": {
+   "msg": "bank[ore]=-1 < 0",
+   "seed": 15000216,
+   "step": 2211,
+   "action": "maritime_trade({'give': <Resource.BRICK: 'brick'>, 'receive': <Resource.ORE: 'ore'>})"
+  },
+  "bank[wood]": {
+   "msg": "bank[wood]=-1 < 0",
+   "seed": 15000460,
+   "step": 1304,
+   "action": "maritime_trade({'give': <Resource.ORE: 'ore'>, 'receive': <Resource.WOOD: 'wood'>})"
+  }
+ },
+ "longest_road_mismatches": 0,
+ "longest_road_mismatch_examples": [],
+ "winner_seat": {
+  "1": 282,
+  "0": 244,
+  "3": 235,
+  "2": 239
+ },
+ "winner_not_current_player": 0,
+ "off_turn_win_seeds": [],
+ "timeouts": 0,
+ "games_with_nonwinner_ge10": 0,
+ "winner_vp_hist": {
+  "10": 952,
+  "11": 48
+ },
+ "max_legal_actions": 100,
+ "mean_turns": 308.161,
+ "mean_steps": 1117.391,
+ "action_type_totals": {
+  "build_settlement": 12693,
+  "build_road": 45075,
+  "roll_dice": 308098,
+  "end_turn": 307161,
+  "propose_trade": 75712,
+  "counter_trade": 17600,
+  "reject_trade": 88393,
+  "move_robber": 51110,
+  "maritime_trade": 123791,
+  "discard": 20452,
+  "accept_trade": 16056,
+  "cancel_trade": 5660,
+  "buy_dev_card": 20395,
+  "play_knight": 11264,
+  "confirm_trade": 5950,
+  "play_year_of_plenty": 1604,
+  "build_city": 3147,
+  "play_monopoly": 1628,
+  "play_road_building": 1602
+ },
+ "min_bank_end": {
+  "wood": 2,
+  "brick": 3,
+  "sheep": 3,
+  "wheat": 1,
+  "ore": 6
+ },
+ "max_bank_end": {
+  "wood": 22,
+  "brick": 22,
+  "sheep": 23,
+  "wheat": 24,
+  "ore": 22
+ }
+}

@@ -38,6 +38,8 @@ from torch.distributions import Categorical
 
 from env.actions import Action, ActionType
 from env.board import Resource
+from env.engine import ALL_OPPONENTS, is_template, make_trade
+from env.state import MAX_TRADE_CARDS_PER_SIDE
 
 NEG_INF = -1e9
 RESOURCE_LIST = list(Resource)
@@ -60,9 +62,12 @@ VERTEX_TYPES = {ActionType.BUILD_SETTLEMENT, ActionType.BUILD_CITY}
 EDGE_TYPES = {ActionType.BUILD_ROAD}
 HEX_PLAYER_TYPES = {ActionType.MOVE_ROBBER, ActionType.PLAY_KNIGHT}
 RESOURCE_SINGLE_TYPES = {ActionType.PLAY_MONOPOLY}
-RESOURCE_PAIR_TYPES = {ActionType.PLAY_YEAR_OF_PLENTY, ActionType.MARITIME_TRADE,
-                        ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE}
-PLAYER_ONLY_TYPES = {ActionType.CONFIRM_TRADE}
+RESOURCE_PAIR_TYPES = {ActionType.PLAY_YEAR_OF_PLENTY, ActionType.MARITIME_TRADE}
+PLAYER_ONLY_TYPES = {ActionType.CONFIRM_TRADE, ActionType.PROPOSE_TRADE}  # PROPOSE: target (slot 4 = all)
+# Structured domestic trades: after the type (and PROPOSE's target) the bundle
+# is decoded by TradeCountHead -- see "Structured trade bundles" below.
+TRADE_TYPES = {ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE}
+NO_PARAM_TYPES = NO_PARAM_TYPES | {ActionType.COUNTER_TRADE}
 DISCARD_TYPES = {ActionType.DISCARD}
 
 # type -> (stage1 head name, stage2 head name or None)
@@ -143,13 +148,12 @@ def stage1_mask(action_type: ActionType, actions_of_type: list[Action]) -> np.nd
             for a in actions_of_type:
                 mask[RESOURCE_LIST.index(a.params["give"])] = 1.0
             return mask
-        if action_type in (ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE):
-            mask = np.zeros(RESOURCE_SIZE, dtype=np.float32)
-            for a in actions_of_type:
-                r = next(iter(a.params["give"]))
-                mask[RESOURCE_LIST.index(r)] = 1.0
-            return mask
     if head == "player":
+        if action_type == ActionType.PROPOSE_TRADE:  # template: opponents + "all" (slot 4)
+            mask = np.zeros(PLAYER_SIZE, dtype=np.float32)
+            for t in actions_of_type[0].params["target_options"]:
+                mask[PLAYER_SIZE - 1 if t == ALL_OPPONENTS else t] = 1.0
+            return mask
         return _mask_from_ids(actions_of_type, "target", PLAYER_SIZE)
     if head == "discard_index":
         mask = np.zeros(DISCARD_INDEX_SIZE, dtype=np.float32)
@@ -182,10 +186,6 @@ def stage2_mask(action_type: ActionType, actions_of_type: list[Action], idx1: in
             for a in actions_of_type:
                 if a.params["give"] == r1:
                     mask[RESOURCE_LIST.index(a.params["receive"])] = 1.0
-        elif action_type in (ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE):
-            for a in actions_of_type:
-                if next(iter(a.params["give"])) == r1:
-                    mask[RESOURCE_LIST.index(next(iter(a.params["want"])))] = 1.0
         return mask
     raise ValueError(f"unhandled stage2 head {head} for {action_type}")
 
@@ -210,10 +210,6 @@ def match_action(action_type: ActionType, actions_of_type: list[Action],
     if action_type == ActionType.MARITIME_TRADE:
         give_r, want_r = RESOURCE_LIST[idx1], RESOURCE_LIST[idx2]
         return next(a for a in actions_of_type if a.params["give"] == give_r and a.params["receive"] == want_r)
-    if action_type in (ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE):
-        give_r, want_r = RESOURCE_LIST[idx1], RESOURCE_LIST[idx2]
-        return next(a for a in actions_of_type
-                    if next(iter(a.params["give"])) == give_r and next(iter(a.params["want"])) == want_r)
     if action_type == ActionType.CONFIRM_TRADE:
         return next(a for a in actions_of_type if a.params["target"] == idx1)
     if action_type == ActionType.DISCARD:
@@ -246,15 +242,138 @@ def action_to_indices(action_type: ActionType, actions_of_type: list[Action],
         return RESOURCE_LIST.index(r1), RESOURCE_LIST.index(r2)
     if action_type == ActionType.MARITIME_TRADE:
         return RESOURCE_LIST.index(action.params["give"]), RESOURCE_LIST.index(action.params["receive"])
-    if action_type in (ActionType.PROPOSE_TRADE, ActionType.COUNTER_TRADE):
-        give_r = next(iter(action.params["give"]))
-        want_r = next(iter(action.params["want"]))
-        return RESOURCE_LIST.index(give_r), RESOURCE_LIST.index(want_r)
+    if action_type == ActionType.PROPOSE_TRADE:
+        targets = action.params["targets"]
+        return (targets[0] if len(targets) == 1 else PLAYER_SIZE - 1), None
     if action_type == ActionType.CONFIRM_TRADE:
         return action.params["target"], None
     if action_type == ActionType.DISCARD:
         return actions_of_type.index(action), None
     raise ValueError(f"unhandled action type {action_type}")
+
+
+# --------------------------------------------------------------------------
+# Structured trade bundles
+# --------------------------------------------------------------------------
+# A domestic trade (PROPOSE_TRADE / COUNTER_TRADE) is decoded as 10 small
+# categorical decisions after the type (and PROPOSE's target): how many of
+# each resource to give (W, B, S, H, O), then how many of each to want, each
+# 0..MAX_TRADE_CARDS_PER_SIDE. Decisions are autoregressive -- TradeCountHead
+# sees the counts chosen so far -- and masked so every completed bundle is
+# legal: 1..3 cards per side, give <= own hand, no resource on both sides.
+
+TRADE_STEPS = 2 * RESOURCE_SIZE
+TRADE_COUNT_SIZE = MAX_TRADE_CARDS_PER_SIDE + 1
+NO_TRADE_COUNTS = np.full(TRADE_STEPS, -1, dtype=np.int64)
+NO_TRADE_MASKS = np.zeros((TRADE_STEPS, TRADE_COUNT_SIZE), dtype=np.float32)
+
+
+def trade_step_mask(k: int, counts: list[int], hand: dict) -> np.ndarray:
+    """Legal counts for decision `k` given the earlier choices `counts`
+    (len k). Zero is masked out exactly when choosing it would leave no way
+    to put at least one card on this side."""
+    mask = np.zeros(TRADE_COUNT_SIZE, dtype=np.float32)
+    j = k % RESOURCE_SIZE
+    if k < RESOURCE_SIZE:  # give side
+        used = sum(counts[:k])
+        cap = min(MAX_TRADE_CARDS_PER_SIDE - used, hand.get(RESOURCE_LIST[j], 0))
+        later_possible = any(hand.get(RESOURCE_LIST[i], 0) > 0 for i in range(j + 1, RESOURCE_SIZE))
+    else:  # want side: never a resource being given
+        give = counts[:RESOURCE_SIZE]
+        used = sum(counts[RESOURCE_SIZE:k])
+        cap = 0 if give[j] > 0 else MAX_TRADE_CARDS_PER_SIDE - used
+        later_possible = any(give[i] == 0 for i in range(j + 1, RESOURCE_SIZE))
+    mask[:max(cap, 0) + 1] = 1.0
+    if used == 0 and not later_possible:
+        mask[0] = 0.0
+    return mask
+
+
+def trade_counts_of(action: Action) -> list[int]:
+    give, want = action.params["give"], action.params["want"]
+    return [give.get(r, 0) for r in RESOURCE_LIST] + [want.get(r, 0) for r in RESOURCE_LIST]
+
+
+def trade_head_data(template: Action, action: Action) -> tuple[np.ndarray, np.ndarray]:
+    """(counts, masks) supervision for a demonstrated concrete trade -- the
+    same arrays `act()` stores for a sampled one."""
+    counts = trade_counts_of(action)
+    masks = np.stack([trade_step_mask(k, counts[:k], template.params["hand"])
+                      for k in range(TRADE_STEPS)])
+    for k, c in enumerate(counts):
+        if masks[k, c] == 0:
+            raise ValueError(f"demonstrated trade {action!r} is outside the bundle space at step {k}")
+    return np.array(counts, dtype=np.int64), masks
+
+
+class TradeCountHead(nn.Module):
+    """Shared autoregressive count head: decision k sees the trunk features,
+    the (normalized) counts of decisions < k, and a one-hot of k."""
+
+    def __init__(self, hidden: int):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(hidden + 2 * TRADE_STEPS, hidden), nn.ReLU(),
+                                 nn.Linear(hidden, TRADE_COUNT_SIZE))
+        self.register_buffer("prefix_mask", torch.tril(torch.ones(TRADE_STEPS, TRADE_STEPS), diagonal=-1),
+                             persistent=False)
+        self.register_buffer("step_onehot", torch.eye(TRADE_STEPS), persistent=False)
+
+    def forward(self, feats: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
+        """feats (B, hidden), counts (B, TRADE_STEPS) long (entries >= the
+        decoded step are ignored) -> logits (B, TRADE_STEPS, TRADE_COUNT_SIZE)."""
+        b = feats.shape[0]
+        c = counts.clamp(min=0).to(feats.dtype) / MAX_TRADE_CARDS_PER_SIDE
+        prefix = c.unsqueeze(1) * self.prefix_mask.unsqueeze(0)
+        steps = self.step_onehot.unsqueeze(0).expand(b, -1, -1)
+        x = torch.cat([feats.unsqueeze(1).expand(-1, TRADE_STEPS, -1), prefix, steps], dim=-1)
+        return self.net(x)
+
+
+def decode_trade(head: TradeCountHead, feats: torch.Tensor, template: Action, idx1: int,
+                 deterministic: bool, legal_actions=None):
+    """Sample a concrete bundle for `template`. Returns (Action, logprob,
+    counts array, masks array)."""
+    device = feats.device
+    hand = template.params["hand"]
+    counts: list[int] = []
+    masks = []
+    logprob = 0.0
+    for k in range(TRADE_STEPS):
+        m = trade_step_mask(k, counts, hand)
+        prefix = torch.tensor([counts + [0] * (TRADE_STEPS - k)], dtype=torch.long, device=device)
+        logits = head(feats, prefix)[0, k]
+        c, lp = masked_sample(logits, torch.as_tensor(m, device=device), deterministic)
+        counts.append(c)
+        masks.append(m)
+        logprob += lp
+    give = {RESOURCE_LIST[i]: c for i, c in enumerate(counts[:RESOURCE_SIZE]) if c}
+    want = {RESOURCE_LIST[i]: c for i, c in enumerate(counts[RESOURCE_SIZE:]) if c}
+    if template.type == ActionType.PROPOSE_TRADE:
+        target = ALL_OPPONENTS if idx1 == PLAYER_SIZE - 1 else idx1
+        action = make_trade(template.type, give, want, actor=template.params["actor"], target=target)
+    else:
+        action = make_trade(template.type, give, want)
+    return action, logprob, np.array(counts, dtype=np.int64), np.stack(masks)
+
+
+def trade_logprob_entropy(head: TradeCountHead, feats: torch.Tensor, tb: dict):
+    """Per-row trade-bundle log-prob and entropy (zero for non-trade rows) --
+    the evaluate_actions side of decode_trade."""
+    n = feats.shape[0]
+    lp = torch.zeros(n, device=feats.device)
+    ent = torch.zeros(n, device=feats.device)
+    tc = tb.get("trade_counts")
+    if tc is None:
+        return lp, ent
+    rows = (tc[:, 0] >= 0).nonzero(as_tuple=True)[0]
+    if rows.numel() == 0:
+        return lp, ent
+    counts = tc[rows]
+    logits = head(feats[rows], counts).masked_fill(tb["trade_masks"][rows] == 0, NEG_INF)
+    dist = Categorical(logits=logits, validate_args=False)
+    lp = lp.index_add(0, rows, dist.log_prob(counts).sum(-1))
+    ent = ent.index_add(0, rows, dist.entropy().sum(-1))
+    return lp, ent
 
 
 def _pad(mask: np.ndarray) -> np.ndarray:
@@ -290,7 +409,12 @@ def prepare_transition_batch(transitions: list[dict], device: str) -> dict[str, 
         for stage, key in ((1, "stage1_head"), (2, "stage2_head")):
             name = t[key]
             head_ids[stage].append(-1 if name is None else HEAD_NAME_INDEX[name])
+    n = len(transitions)
+    trade_counts = np.array([t.get("trade_counts", NO_TRADE_COUNTS) for t in transitions], dtype=np.int64)
+    trade_masks = np.array([t.get("trade_masks", NO_TRADE_MASKS) for t in transitions], dtype=np.float32)
     return {
+        "trade_counts": torch.as_tensor(trade_counts.reshape(n, TRADE_STEPS), device=device),
+        "trade_masks": torch.as_tensor(trade_masks.reshape(n, TRADE_STEPS, TRADE_COUNT_SIZE), device=device),
         "type_mask": torch.as_tensor(np.array([t["type_mask"] for t in transitions]), device=device),
         "type_idx": torch.tensor([t["type_idx"] for t in transitions], dtype=torch.long, device=device),
         "head1_id": torch.tensor(head_ids[1], dtype=torch.long, device=device),
@@ -318,6 +442,7 @@ class HierarchicalActorCritic(nn.Module):
         self.resource_head = nn.Linear(hidden, RESOURCE_SIZE)
         self.resource2_head = nn.Linear(hidden, RESOURCE_SIZE)
         self.discard_index_head = nn.Linear(hidden, DISCARD_INDEX_SIZE)
+        self.trade_head = TradeCountHead(hidden)
         self.value_head = nn.Linear(hidden, 1)
         self._head_modules = {
             "vertex": self.vertex_head, "edge": self.edge_head, "hex": self.hex_head,
@@ -373,8 +498,14 @@ class HierarchicalActorCritic(nn.Module):
                 logprob += lp2
                 mask2_padded = _pad(mask2)
 
-        result_action = match_action(chosen_type, actions_of_type,
-                                      idx1 if idx1 != -1 else None, idx2 if idx2 != -1 else None)
+        trade_counts, trade_masks = NO_TRADE_COUNTS, NO_TRADE_MASKS
+        if chosen_type in TRADE_TYPES:
+            result_action, lp_t, trade_counts, trade_masks = decode_trade(
+                self.trade_head, feats, actions_of_type[0], idx1, deterministic, legal_actions)
+            logprob += lp_t
+        else:
+            result_action = match_action(chosen_type, actions_of_type,
+                                          idx1 if idx1 != -1 else None, idx2 if idx2 != -1 else None)
         value = self.value_head(feats).squeeze(0).squeeze(-1)
 
         head_data = {
@@ -382,6 +513,7 @@ class HierarchicalActorCritic(nn.Module):
             "stage1_head": stage1_head, "stage2_head": stage2_head,
             "sub_mask_1": mask1_padded, "sub_idx_1": idx1,
             "sub_mask_2": mask2_padded, "sub_idx_2": idx2,
+            "trade_counts": trade_counts, "trade_masks": trade_masks,
         }
         return result_action, logprob, float(value.item()), head_data
 
@@ -426,4 +558,5 @@ class HierarchicalActorCritic(nn.Module):
                 extra_logprob[rows] += dist.log_prob(sub_idxs)
                 extra_entropy[rows] += dist.entropy()
 
-        return logprob + extra_logprob, entropy + extra_entropy, value
+        trade_lp, trade_ent = trade_logprob_entropy(self.trade_head, feats, tb)
+        return logprob + extra_logprob + trade_lp, entropy + extra_entropy + trade_ent, value

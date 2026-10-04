@@ -13,7 +13,8 @@ import torch
 
 from env.actions import Action, ActionType
 from env.board import Resource
-from env.engine import CatanEngine, legal_actions, step
+from agents.random_agent import choose as random_choose
+from env.engine import CatanEngine, is_legal_action, legal_actions, step
 from env.state import DevCard, Phase, new_game
 from env.pettingzoo_env import CatanAECEnv
 from training.model import flatten_observation, observation_dim
@@ -36,7 +37,7 @@ def test_setup_grants_are_tracked_exactly():
     engine = CatanEngine(randomize_board=True, seed=3)
     rng = random.Random(3)
     while engine.state.phase in (Phase.SETUP_SETTLEMENT, Phase.SETUP_ROAD):
-        engine.step(rng.choice(engine.legal_actions()))
+        engine.step(random_choose(engine.state, rng))
     for pid, p in engine.state.players.items():
         for r in Resource:
             assert abs(_est(engine.state, pid)[r] - p.resources[r]) < 1e-9, \
@@ -145,7 +146,7 @@ def test_observation_gating_off_by_default_on_by_flag():
         obs, reward, term, trunc, info = env_on.last()
         if term or trunc:
             break
-        env_on.step(rng.randrange(len(env_on.legal_actions())))
+        env_on.step(random_choose(env_on.engine.state, rng, env_on.legal_actions()))
     obs_on = env_on.observe(env_on.agent_selection)
     assert obs_on["public_est_resources"].shape == (4, 5)
     assert obs_on["public_est_unknown"].shape == (4,)
@@ -169,7 +170,7 @@ def test_gnn_observation_and_model_with_flag():
     engine = CatanEngine(randomize_board=True, seed=5)
     rng = random.Random(5)
     for _ in range(12):
-        engine.step(rng.choice(engine.legal_actions()))
+        engine.step(random_choose(engine.state, rng))
     state = engine.state
 
     obs_off = build_graph_observation(state, 0)
@@ -187,7 +188,7 @@ def test_gnn_observation_and_model_with_flag():
     acts = legal_actions(state)
     obs_t = {k: torch.tensor(v, dtype=torch.float32).unsqueeze(0) for k, v in obs_on.items()}
     action, logprob, value, head_data = model.act(obs_t, acts, deterministic=True)
-    assert action in acts
+    assert is_legal_action(state, action)
 
 
 def test_end_to_end_training_step_with_flag_both_models():

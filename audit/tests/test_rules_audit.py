@@ -417,28 +417,25 @@ def test_maritime_trade_requires_bank_stock():
 def test_trade_protocol_atomic_and_only_current_player_proposes():
     s = fresh_main_state(10_000_023)
     give(s, 0, wood=1); give(s, 2, ore=1)
-    prop = next(a for a in legal_actions(s) if a.type == ActionType.PROPOSE_TRADE
-                and W in a.params["give"] and O in a.params["want"])
-    step(s, prop)
+    from env.engine import ALL_OPPONENTS, make_trade
+    step(s, make_trade(ActionType.PROPOSE_TRADE, {W: 1}, {O: 1}, actor=0, target=ALL_OPPONENTS))
     assert acting_player(s) == 1
-    step(s, Action(ActionType.ACCEPT_TRADE))   # p1 accepts but has no ore
+    step(s, Action(ActionType.REJECT_TRADE))   # p1 has no ore: cannot accept
     step(s, Action(ActionType.ACCEPT_TRADE))   # p2 accepts
     step(s, Action(ActionType.REJECT_TRADE))   # p3
     assert acting_player(s) == 0 and {a.type for a in legal_actions(s)} == \
         {ActionType.CONFIRM_TRADE, ActionType.CANCEL_TRADE}
-    sig = state_signature(s)
-    step(s, Action(ActionType.CONFIRM_TRADE, {"target": 1}))  # p1 can't pay -> no-op
-    assert s.players[0].resources[W] == 1 and s.players[1].resources[O] == 0
+    step(s, Action(ActionType.CONFIRM_TRADE, {"target": 2}))
+    assert s.players[0].resources[O] == 1 and s.players[2].resources[W] == 1
     assert check_invariants(s) == []
 
 
-@pytest.mark.xfail(strict=True, reason="F-13: ACCEPT_TRADE is legal for a responder who cannot pay; "
-                                         "CONFIRM on that responder silently no-ops and ends the trade")
 def test_accept_requires_ability_to_pay():
+    """F-13 regression."""
+    from env.engine import make_trade
     s = fresh_main_state(10_000_024)
     give(s, 0, wood=1)
-    step(s, next(a for a in legal_actions(s) if a.type == ActionType.PROPOSE_TRADE
-                 and O in a.params["want"]))
+    step(s, make_trade(ActionType.PROPOSE_TRADE, {W: 1}, {O: 1}, actor=0, target=1))
     assert ActionType.ACCEPT_TRADE not in types(s)
 
 

@@ -93,7 +93,7 @@ def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
             # the same object -- making the .index() lookup an identity scan.
             legal = env.legal_actions()
             concrete_action = opponent_agents[pid].choose(env.engine.state, legal)
-            action_idx = legal.index(concrete_action)
+            action_idx = _env_action(legal, concrete_action)
         else:
             legal = env.legal_actions()
             if skip_forced and len(legal) == 1:
@@ -105,12 +105,25 @@ def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
                 obs_t = adapter.to_single(encoded, device)
                 with torch.inference_mode():
                     concrete_action, logprob, value, head_data = model.act(obs_t, legal, deterministic=False)
-                action_idx = legal.index(concrete_action)
+                action_idx = _env_action(legal, concrete_action)
                 pending[agent] = {"obs": encoded, "logprob": logprob, "value": value,
                                   "reward": 0.0, **head_data}
         env.step(action_idx)
 
     return episode_data
+
+
+def _env_action(legal: list, action):
+    """Index into the legal list when the chosen action is listed; otherwise
+    (a structured trade built from a template) the concrete Action itself,
+    which CatanAECEnv.step validates."""
+    for i, a in enumerate(legal):
+        if a is action:
+            return i
+    try:
+        return legal.index(action)
+    except ValueError:
+        return action
 
 
 def _episode_summary(env: CatanAECEnv, seed: int, opponent_agents: dict[int, object] | None,

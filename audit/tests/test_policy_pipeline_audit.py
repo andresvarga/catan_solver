@@ -67,8 +67,10 @@ def test_masked_heads_never_select_illegal_and_no_nan():
             x = adapter.to_single(adapter.encode(env, obs, int(env.agent_selection[-1])), "cpu")
             with torch.inference_mode():
                 a, lp, v, hd = model.act(x, legal, deterministic=False)
-            assert a in legal and math.isfinite(lp) and lp <= 1e-6
-            env.step(legal.index(a))
+            from env.engine import is_legal_action
+            from training.hier_ppo import _env_action
+            assert is_legal_action(env.engine.state, a) and math.isfinite(lp) and lp <= 1e-6
+            env.step(_env_action(legal, a))
             n += 1
     assert n >= 10_000
 

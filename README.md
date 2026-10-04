@@ -47,6 +47,10 @@ Python/env overhead anyway (GPU wouldn't help there).
   (index into the current legal-action list — see the module docstring for
   why this is a placeholder for the factorized policy head described in the
   design doc's action-space section, not the final RL-facing encoding).
+  Domestic trades are *structured*: the legal list carries one
+  PROPOSE_TRADE / COUNTER_TRADE template (masked out of the index space), and
+  a concrete bundle built with `env.engine.make_trade` is passed to
+  `env.step(action)` as an `Action`, validated by `engine.is_legal_action`.
 - `agents/random_agent.py` — legal-action agent (function + `RandomAgent`
   class) for smoke testing and as the evaluation-tier floor.
 - `agents/heuristic.py` — greedy-expansion + needs-based trade agent
@@ -181,12 +185,16 @@ system is broken.
 
 ## Known simplifications (documented in code, worth revisiting later)
 
-- `legal_actions()` caps DISCARD combinations at 100 and PROPOSE_TRADE/
-  MARITIME_TRADE to simple single-resource-for-single-resource bundles —
-  a reference enumeration for testing and random play; `HierarchicalActorCritic`
-  already uses genuine pointer/multi-discrete heads instead of enumeration
-  for everything except DISCARD, which stays a flat index specifically
-  because it's a homogeneous per-phase list (no cross-type drift risk).
+- Domestic trading is a bounded variant of free negotiation: bundles of 1-3
+  cards per side (`MAX_TRADE_CARDS_PER_SIDE`), no resource on both sides,
+  addressed to one opponent or all; responders accept (only if they can
+  pay), reject, or make one counter-offer of the same shape; at most
+  `MAX_TRADE_PROPOSALS_PER_TURN` (4) proposals per turn. The policy decodes a
+  bundle autoregressively (`training/hier_model.TradeCountHead`).
+- `legal_actions()` caps DISCARD combinations at 100; `HierarchicalActorCritic`
+  uses pointer/multi-discrete heads instead of enumeration for everything
+  except DISCARD, which stays a flat index specifically because it's a
+  homogeneous per-phase list (no cross-type drift risk).
 - Port placement is evenly spaced around the boundary ring rather than
   replicating one specific real-world board's exact port corners.
 - League exploiters are trained *sequentially* (pause main training, run a

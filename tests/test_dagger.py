@@ -10,7 +10,7 @@ from training.hier_model import HierarchicalActorCritic
 from training.model import observation_dim
 
 DATA_KEYS = {"obs", "type_mask", "type_idx", "head1_id", "sub_mask_1", "sub_idx_1",
-             "head2_id", "sub_mask_2", "sub_idx_2"}
+             "head2_id", "sub_mask_2", "sub_idx_2", "trade_counts", "trade_masks"}
 
 
 def _model():

@@ -28,8 +28,9 @@ from env.pettingzoo_env import build_observation
 from env.state import NUM_PLAYERS
 from training.graph_features import build_graph_observation
 from training.hier_model import (
-    ACTION_TYPE_INDEX, HEAD_NAME_INDEX, NUM_ACTION_TYPES, SUBMASK_PAD, TYPE_TO_HEADS,
-    _pad, action_to_indices, group_by_type, stage1_mask, stage2_mask,
+    ACTION_TYPE_INDEX, HEAD_NAME_INDEX, NO_TRADE_COUNTS, NO_TRADE_MASKS, NUM_ACTION_TYPES,
+    SUBMASK_PAD, TRADE_TYPES, TYPE_TO_HEADS, _pad, action_to_indices, group_by_type, stage1_mask,
+    stage2_mask, trade_head_data,
 )
 from training.imitation_data import OBS_PREFIX
 from training.model import flatten_observation
@@ -57,6 +58,9 @@ def encode_decision(state, actor: int, acts, chosen, public_hand_features: bool,
     mask1 = _pad(stage1_mask(chosen.type, actions_of_type)) if stage1_head else np.zeros(SUBMASK_PAD, dtype=np.float32)
     mask2 = (_pad(stage2_mask(chosen.type, actions_of_type, idx1)) if stage2_head
              else np.zeros(SUBMASK_PAD, dtype=np.float32))
+    # structured trades: the demonstrated concrete bundle vs the listed template
+    trade_counts, trade_masks = (trade_head_data(actions_of_type[0], chosen) if chosen.type in TRADE_TYPES
+                                 else (NO_TRADE_COUNTS, NO_TRADE_MASKS))
 
     if model_type == "gnn":
         obs = build_graph_observation(state, actor, public_hand_features=public_hand_features)
@@ -74,6 +78,8 @@ def encode_decision(state, actor: int, acts, chosen, public_hand_features: bool,
         "head2_id": HEAD_NAME_INDEX[stage2_head] if stage2_head else -1,
         "sub_mask_2": mask2,
         "sub_idx_2": idx2 if idx2 is not None else -1,
+        "trade_counts": trade_counts,
+        "trade_masks": trade_masks,
     }
 
 
@@ -93,6 +99,8 @@ def records_to_arrays(records: list[dict], model_type: str = "hier") -> dict[str
         "head2_id": np.array([r["head2_id"] for r in records], dtype=np.int64),
         "sub_mask_2": np.stack([r["sub_mask_2"] for r in records]).astype(np.float32),
         "sub_idx_2": np.array([r["sub_idx_2"] for r in records], dtype=np.int64),
+        "trade_counts": np.stack([r["trade_counts"] for r in records]).astype(np.int64),
+        "trade_masks": np.stack([r["trade_masks"] for r in records]).astype(np.float32),
     }
 
 

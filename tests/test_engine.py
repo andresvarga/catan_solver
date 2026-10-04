@@ -8,6 +8,7 @@ from env.engine import (
     CatanEngine, acting_player, award_knight, can_build_city, can_build_road,
     can_build_settlement, check_win, compute_longest_road_length, distribute_resources,
     legal_actions, recompute_longest_road, step, total_vp, trade_ratio_for,
+    ALL_OPPONENTS, is_template, make_trade,
 )
 from env.state import BUILDING_COSTS, DevCard, MAX_TRADE_PROPOSALS_PER_TURN, Phase, new_game
 
@@ -292,7 +293,9 @@ def test_propose_trade_is_capped_per_turn_and_resets_on_end_turn():
     def propose_and_reject_all(st):
         actions = [a for a in legal_actions(st) if a.type == ActionType.PROPOSE_TRADE]
         assert actions, "expected PROPOSE_TRADE to still be legal"
-        step(st, actions[0], rng=rng)
+        assert is_template(actions[0])  # structured trades: one template entry
+        step(st, make_trade(ActionType.PROPOSE_TRADE, {Resource.WOOD: 1}, {Resource.ORE: 1},
+                            actor=st.current_player, target=ALL_OPPONENTS), rng=rng)
         while st.phase == Phase.TRADE_RESPONSE:
             resp_actions = legal_actions(st)
             reject = next((a for a in resp_actions if a.type == ActionType.REJECT_TRADE), None)

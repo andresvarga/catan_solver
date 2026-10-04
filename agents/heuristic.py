@@ -14,7 +14,7 @@ from collections import deque
 from env.actions import Action, ActionType
 from env.board import PIP_COUNT, Resource
 from env.engine import (
-    legal_actions, total_vp, trade_ratio_for, vertex_distance_ok,
+    ALL_OPPONENTS, legal_actions, make_trade, total_vp, trade_ratio_for, vertex_distance_ok,
 )
 from env.state import BUILDING_COSTS, GameState, MIN_LONGEST_ROAD, Phase
 
@@ -278,8 +278,14 @@ class HeuristicAgent:
                 return a
         return None
 
+    def _candidate_one_for_one(self, hand) -> list[tuple[Resource, Resource]]:
+        """(give, want) 1-for-1 pairs in the fixed order the pre-structured
+        engine used to enumerate them -- keeps this baseline's behaviour (and
+        RNG consumption) unchanged now that trades are built, not listed."""
+        return [(g, w) for g in Resource if hand.get(g, 0) >= 1 for w in Resource if w != g]
+
     def _maybe_propose_trade(self, state: GameState, propose_actions: list[Action]) -> Action | None:
-        if not propose_actions:
+        if not propose_actions:  # the PROPOSE_TRADE template (or nothing)
             return None
         if self._trade_proposals_this_turn >= MAX_TRADE_PROPOSALS_PER_TURN:
             # a rejected/countered-and-rejected proposal returns to MAIN with
@@ -292,17 +298,17 @@ class HeuristicAgent:
             return None
         hand = state.players[self.player_id].resources
         candidates = []
-        for a in propose_actions:
-            give_r = next(iter(a.params["give"]))
-            want_r = next(iter(a.params["want"]))
+        for give_r, want_r in self._candidate_one_for_one(hand):
             if want_r not in needed:
                 continue
             surplus = hand.get(give_r, 0) - missing.get(give_r, 0) - 1  # keep a spare
             if surplus >= 0:
-                candidates.append(a)
+                candidates.append((give_r, want_r))
         if candidates:
             self._trade_proposals_this_turn += 1
-            return self.rng.choice(candidates)
+            give_r, want_r = self.rng.choice(candidates)
+            return make_trade(ActionType.PROPOSE_TRADE, {give_r: 1}, {want_r: 1},
+                              actor=self.player_id, target=ALL_OPPONENTS)
         return None
 
     # -- discard --------------------------------------------------------------
@@ -340,17 +346,17 @@ class HeuristicAgent:
         return gain_score - cost_score
 
     def _pick_counter(self, state: GameState, counter_actions: list[Action]) -> Action | None:
+        if not counter_actions:  # the COUNTER_TRADE template (or nothing)
+            return None
         _, missing = self._target(state)
         needed = {r for r, amt in missing.items() if amt > 0}
         hand = state.players[self.player_id].resources
-        for a in counter_actions:
-            give_r = next(iter(a.params["give"]))
-            want_r = next(iter(a.params["want"]))
+        for give_r, want_r in self._candidate_one_for_one(hand):
             if want_r not in needed:
                 continue
             surplus = hand.get(give_r, 0) - missing.get(give_r, 0) - 1
             if surplus >= 0:
-                return a
+                return make_trade(ActionType.COUNTER_TRADE, {give_r: 1}, {want_r: 1})
         return None
 
     def _choose_trade_response(self, state: GameState, actions: list[Action]) -> Action:
@@ -367,7 +373,7 @@ class HeuristicAgent:
             # responding to a counter-offer made to us (only accept/reject exist)
             ctx = state.trade_counter_context
             desirability = self._trade_desirability(state, gain=ctx.give, cost=ctx.want)
-            if desirability > 0:
+            if desirability > 0 and ActionType.ACCEPT_TRADE in by_type:  # absent if we can't pay
                 return by_type[ActionType.ACCEPT_TRADE][0]
             return by_type[ActionType.REJECT_TRADE][0]
 
@@ -375,7 +381,7 @@ class HeuristicAgent:
         # and receive `give` (see TradeOffer/_execute_trade semantics)
         offer = state.pending_trade
         desirability = self._trade_desirability(state, gain=offer.give, cost=offer.want)
-        if desirability > 0.5:
+        if desirability > 0.5 and ActionType.ACCEPT_TRADE in by_type:  # absent if we can't pay
             return by_type[ActionType.ACCEPT_TRADE][0]
         if ActionType.COUNTER_TRADE in by_type:
             counter = self._pick_counter(state, by_type[ActionType.COUNTER_TRADE])

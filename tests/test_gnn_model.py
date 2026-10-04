@@ -3,7 +3,7 @@ import random
 import numpy as np
 import torch
 
-from env.engine import CatanEngine, legal_actions
+from env.engine import CatanEngine, is_legal_action, legal_actions
 from training.board_topology import (
     EDGE_TO_VERTEX, HEX_TO_VERTEX, NUM_EDGES, NUM_HEXES, NUM_VERTICES,
     VERTEX_TO_EDGE, VERTEX_TO_HEX, VERTEX_TO_VERTEX,
@@ -73,7 +73,7 @@ def test_act_returns_legal_actions_across_many_boards():
             obs = build_graph_observation(engine.state, actor)
             obs_t = {k: torch.tensor(v, dtype=torch.float32).unsqueeze(0) for k, v in obs.items()}
             action, logprob, value, head_data = model.act(obs_t, acts, deterministic=(step % 2 == 0))
-            assert action in acts
+            assert is_legal_action(engine.state, action)
             assert np.isfinite(logprob) and np.isfinite(value)
             engine.step(action)
 

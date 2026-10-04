@@ -5,7 +5,7 @@ from agents.search_heuristic import (
     RolloutSearchAgent, SearchHeuristicAgent, copy_state,
 )
 from env.actions import ActionType
-from env.engine import CatanEngine, legal_actions, total_vp
+from env.engine import CatanEngine, is_legal_action, legal_actions, total_vp
 from env.state import NUM_PLAYERS, Phase
 
 
@@ -19,7 +19,7 @@ def test_search_agent_plays_full_legal_games():
             actor = engine.acting_player()
             acts = legal_actions(engine.state)
             choice = agents[actor].choose(engine.state, acts)
-            assert choice in acts  # never invents an illegal action
+            assert is_legal_action(engine.state, choice)  # never invents an illegal action
             engine.step(choice)
             steps += 1
         assert engine.done or steps == 4000
@@ -97,7 +97,7 @@ def test_rollout_agent_plays_full_legal_games():
     while not engine.done and steps < 4000:
         acts = legal_actions(engine.state)
         choice = agents[engine.acting_player()].choose(engine.state, acts)
-        assert choice in acts
+        assert is_legal_action(engine.state, choice)
         engine.step(choice)
         steps += 1
     assert engine.done or steps == 4000

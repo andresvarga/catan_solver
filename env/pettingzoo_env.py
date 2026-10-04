@@ -25,10 +25,10 @@ from pettingzoo.utils.env import AECEnv
 from env.actions import Action
 from env.board import HexType, Resource
 from env.engine import (
-    CatanEngine, acting_player as engine_acting_player, legal_actions as engine_legal_actions,
-    total_vp,
+    CatanEngine, acting_player as engine_acting_player, is_legal_action, is_template,
+    legal_actions as engine_legal_actions, total_vp,
 )
-from env.state import DevCard, NUM_PLAYERS, Phase, PlayerState
+from env.state import DevCard, MAX_TRADE_PROPOSALS_PER_TURN, NUM_PLAYERS, Phase, PlayerState
 
 MAX_ACTIONS = 400
 NUM_HEXES = 19
@@ -132,6 +132,10 @@ class CatanAECEnv(AECEnv):
             "counter_trade_give": spaces.Box(0, 19, (5,), dtype=np.int16),
             "counter_trade_want": spaces.Box(0, 19, (5,), dtype=np.int16),
             "counter_trade_proposer": spaces.Box(-1, NUM_PLAYERS - 1, (1,), dtype=np.int8),
+            # who the live proposal is addressed to (absolute seats) and how
+            # many of the turn owner's proposals are already used
+            "pending_trade_targets": spaces.Box(0, 1, (NUM_PLAYERS,), dtype=np.int8),
+            "trades_proposed_this_turn": spaces.Box(0, MAX_TRADE_PROPOSALS_PER_TURN, (1,), dtype=np.int8),
             "action_mask": spaces.Box(0, 1, (MAX_ACTIONS,), dtype=np.int8),
         })
 
@@ -184,15 +188,28 @@ class CatanAECEnv(AECEnv):
             self._cumulative_rewards[agent] = 0.0
 
     # -- stepping -----------------------------------------------------------
-    def step(self, action: int) -> None:
+    def step(self, action) -> None:
+        """`action` is either an int index into `legal_actions()` (the
+        Discrete contract; trade *templates* are not valid indices and are
+        0 in `action_mask`), or a concrete `Action` -- the only way to submit
+        a structured trade (engine.make_trade). Anything illegal raises
+        ValueError before the game state is touched."""
         agent = self.agent_selection
         if self.terminations[agent] or self.truncations[agent]:
             return self._was_dead_step(action)
 
-        if action < 0 or action >= len(self._legal_cache):
-            raise ValueError(f"action index {action} out of range for "
-                              f"{len(self._legal_cache)} legal actions")
-        concrete = self._legal_cache[action]
+        if isinstance(action, Action):
+            if not is_legal_action(self.engine.state, action):
+                raise ValueError(f"illegal action {action!r}")
+            concrete = action
+        else:
+            if action < 0 or action >= len(self._legal_cache):
+                raise ValueError(f"action index {action} out of range for "
+                                  f"{len(self._legal_cache)} legal actions")
+            concrete = self._legal_cache[action]
+            if is_template(concrete):
+                raise ValueError(f"index {action} is a {concrete.type.value} template; submit a "
+                                  "concrete trade Action (engine.make_trade) instead")
 
         self.rewards = {a: 0.0 for a in self.agents}
         self.engine.step(concrete)
@@ -399,9 +416,14 @@ def build_observation(state, pid: int, legal_cache: list[Action], show_mask: boo
             counter_want[RESOURCE_INDEX[r]] = amt
         counter_proposer = state.trade_counter_context.proposer
 
+    pending_targets = np.zeros(NUM_PLAYERS, dtype=np.int8)
+    if state.pending_trade is not None:
+        pending_targets[state.pending_trade.targets] = 1
+
     mask = np.zeros(MAX_ACTIONS, dtype=np.int8)
     if show_mask:
-        mask[: len(legal_cache)] = 1
+        # templates aren't steppable by index (see CatanAECEnv.step)
+        mask[: len(legal_cache)] = [0 if is_template(a) else 1 for a in legal_cache]
 
     extra = {}
     if public_hand_features:
@@ -442,5 +464,7 @@ def build_observation(state, pid: int, legal_cache: list[Action], show_mask: boo
         "counter_trade_give": counter_give,
         "counter_trade_want": counter_want,
         "counter_trade_proposer": np.array([counter_proposer], dtype=np.int8),
+        "pending_trade_targets": pending_targets,
+        "trades_proposed_this_turn": np.array([state.trades_proposed_this_turn], dtype=np.int8),
         "action_mask": mask,
     }
