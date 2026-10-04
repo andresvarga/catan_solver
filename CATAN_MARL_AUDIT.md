@@ -28,9 +28,9 @@ The findings below describe the code **as audited** (`6e6949a`). Since then:
 | F-14 seat-0-only eval | **Fixed**: seat rotated by seed, Wilson CIs printed | `537a79a` |
 | F-15 short credit horizon | **Fixed**: γ=0.999, λ=0.98, forced moves not stored | `537a79a` |
 | F-18 lost runs | **Mitigated**: `manifest.json` per run (old artifacts unrecoverable) | `537a79a` |
-| F-20 1:1-only trading | **Fixed (bounded variant)**: 1-3 cards per side, targeted or broadcast, multi-card counters, 4 proposals/turn, structured actions + autoregressive bundle head | working tree (uncommitted) |
-| F-13 ACCEPT without paying | **Fixed** as part of F-20 | working tree |
-| F-05 no step validation | **Partly fixed**: `CatanEngine.step` and `CatanAECEnv.step` validate; raw `engine.step` stays unchecked for simulation speed | working tree |
+| F-20 1:1-only trading | **Fixed (bounded variant)**: 1-3 cards per side, targeted or broadcast, multi-card counters, 4 proposals/turn, structured actions + autoregressive bundle head | commit `cfe8b96` |
+| F-13 ACCEPT without paying | **Fixed** as part of F-20 | `cfe8b96` |
+| F-05 no step validation | **Partly fixed**: `CatanEngine.step` and `CatanAECEnv.step` validate; raw `engine.step` stays unchecked for simulation speed | `cfe8b96` |
 | F-01, F-02, F-10, F-11, F-12, F-16, F-17, F-19, F-21–F-29 | Open | — |
 
 ## Executive Summary
