@@ -133,6 +133,26 @@ python3 -m training.league_train --iterations 200 --num-workers 12 \
   --init-checkpoint <a training_hier checkpoint>.pt --eval-every 25
 ```
 
+## Evaluating a policy
+
+Use the standard protocol (`scripts/evaluate_candidate.py`, library in
+`evaluation/`): every board seed is played from all four seats, against a
+fixed opponent pool (heuristic, honest heuristic, search agent; past
+checkpoints via `ckpt:` specs), with Wilson 95% CIs and per-seat rates.
+`--baseline` adds a *paired* comparison on identical games (McNemar test +
+seed-bootstrap CI of the difference).
+
+Seeds come from the registry (`evaluation/seed_registry.json`): `inloop` for
+in-training evals, `selection` for choosing checkpoints, `confirm_1..5` for
+claims (each use is logged to `evaluation/seed_usage.jsonl`, and reuse warns).
+Training drivers refuse seed ranges that overlap any evaluation set.
+
+```
+python -m scripts.evaluate_candidate --candidate ckpt:gnn:run/latest.pt:256:4:phf --seeds 250
+python -m scripts.evaluate_candidate --candidate ckpt:gnn:new.pt:256:4:phf \
+    --baseline ckpt:gnn:champ.pt:256:4:phf --seed-set confirm_1
+```
+
 ## Status
 
 Environment + rules engine + PettingZoo wrapper (phases 1-2), the heuristic

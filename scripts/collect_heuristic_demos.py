@@ -22,6 +22,7 @@ import time
 
 import numpy as np
 
+from evaluation.seeds import check_training_seeds
 from agents.heuristic import HeuristicAgent
 from env.engine import CatanEngine, legal_actions
 from env.pettingzoo_env import build_observation
@@ -101,6 +102,9 @@ def records_to_arrays(records: list[dict], model_type: str = "hier") -> dict[str
         "sub_idx_2": np.array([r["sub_idx_2"] for r in records], dtype=np.int64),
         "trade_counts": np.stack([r["trade_counts"] for r in records]).astype(np.int64),
         "trade_masks": np.stack([r["trade_masks"] for r in records]).astype(np.float32),
+        # source game seed per row (-1 if the collector didn't record one) so
+        # training can hold out whole games rather than correlated rows
+        "game_id": np.array([r.get("game_id", -1) for r in records], dtype=np.int64),
     }
 
 
@@ -117,7 +121,9 @@ def play_and_record(seed: int, public_hand_features: bool, model_type: str = "hi
         acts = legal_actions(state)
         chosen = agents[actor].choose(state, acts)
         if len(acts) > 1:
-            records.append(encode_decision(state, actor, acts, chosen, public_hand_features, model_type))
+            rec = encode_decision(state, actor, acts, chosen, public_hand_features, model_type)
+            rec["game_id"] = seed  # lets BC hold out whole games (audit F-21)
+            records.append(rec)
         engine.step(chosen)
         steps += 1
     return records
@@ -163,6 +169,7 @@ def main():
     resource_weights = {HexType.ORE: args.ore_weight} if args.ore_weight != 1.0 else None
 
     seeds = list(range(args.seed, args.seed + args.games))
+    check_training_seeds(seeds[0], seeds[-1], "demonstration collection")
     t0 = time.time()
     if args.num_workers <= 1:
         _init_worker(args.public_hand_features, args.model_type, resource_weights)

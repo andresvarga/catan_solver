@@ -12,80 +12,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import multiprocessing as mp
-import random
 import time
 
-from agents.heuristic import HeuristicAgent
-from agents.random_agent import RandomAgent
-from env.engine import CatanEngine, total_vp
 from env.state import NUM_PLAYERS
+
+from evaluation.tournament import make_agent, play_game, wilson  # promoted to evaluation/ (Phase 3)
 
 MAX_STEPS = 6000
 
 
-def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    if n == 0:
-        return (0.0, 1.0)
-    p = k / n
-    d = 1 + z * z / n
-    c = (p + z * z / (2 * n)) / d
-    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
-    return (c - h, c + h)
-
-
-from agents.heuristic import HonestHeuristicAgent as HonestHeuristic  # moved to agents/ (roadmap Phase 2)
-
-
-_MODEL_CACHE = {}
-
-
-def make_agent(spec: str, pid: int, seed: int):
-    rng = random.Random(seed * 97 + pid)
-    if spec == "random":
-        return RandomAgent(pid, rng)
-    if spec == "heuristic":
-        return HeuristicAgent(pid, rng)
-    if spec == "honest":
-        return HonestHeuristic(pid, rng)
-    if spec == "search":
-        from agents.search_heuristic import SearchHeuristicAgent
-        return SearchHeuristicAgent(pid, rng)
-    if spec.startswith("ckpt:") or spec.startswith("untrained:"):
-        from training.agent import HierarchicalLearnedAgent
-        kind, mk, *rest = spec.split(":")
-        path = ":".join(rest)
-        key = spec
-        if key not in _MODEL_CACHE:
-            import torch
-            torch.manual_seed(int(path) if kind == "untrained" and path.isdigit() else 0)
-            if kind == "untrained":
-                from training.train_hier import build_model
-                m = build_model(mk, 256 if mk == "hier" else 128, 3)
-            else:
-                from training.agent import load_gnn_model, load_hier_model
-                m = load_hier_model(path) if mk == "hier" else load_gnn_model(path)
-            m.eval()
-            _MODEL_CACHE[key] = m
-        sampled = spec.endswith("#sample")
-        return HierarchicalLearnedAgent(pid, rng, model=_MODEL_CACHE[key], deterministic=not sampled,
-                                        model_kind=mk)
-    raise ValueError(spec)
-
-
 def play(args):
-    seed, cand_seat, cand, opp = args
-    eng = CatanEngine(randomize_board=True, seed=seed)
-    agents = {pid: make_agent(cand if pid == cand_seat else opp, pid, seed) for pid in range(NUM_PLAYERS)}
-    steps = 0
-    while not eng.done and steps < MAX_STEPS:
-        a = agents[eng.acting_player()].choose(eng.state)
-        eng.step(a)
-        steps += 1
-    s = eng.state
-    return {"seed": seed, "seat": cand_seat, "won": s.winner == cand_seat, "done": eng.done,
-            "winner": s.winner, "vp": total_vp(s, cand_seat), "turns": s.turn_number, "steps": steps}
+    return play_game(*args)
 
 
 def _init():

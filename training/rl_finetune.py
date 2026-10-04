@@ -43,12 +43,14 @@ import time
 import numpy as np
 import torch
 
+from evaluation.seeds import check_training_seeds, load_registry
 from agents.heuristic import HeuristicAgent
 from agents.opponent_pool import PooledOpponent, builtin_members, checkpoint_member
 from env.state import NUM_PLAYERS
 from training.hier_ppo import (
     collect_rollout_parallel, compute_holdout_nll, load_bc_anchor, ppo_update,
 )
+from training.imitation_data import split_by_game
 from training.model_adapters import ADAPTERS
 from training.run_manifest import write_manifest
 from training.ppo import GAE_LAMBDA, GAMMA
@@ -115,9 +117,11 @@ def main():
     parser.add_argument("--eval-games", type=int, default=120,
                          help="per seed base (two bases); keep divisible by 4 so the seat "
                               "rotation (seed %% 4) is balanced")
-    parser.add_argument("--eval-seed-bases", type=int, nargs=2, default=[4_700_000, 4_800_000],
-                         help="in-loop selection signal only -- final claims need a "
-                              "fresh-seed confirmatory on never-used bases")
+    parser.add_argument("--eval-seed-bases", type=int, nargs=2,
+                         default=load_registry()["sets"]["inloop"]["bases"],
+                         help="in-loop selection signal only (default: the registry's 'inloop' "
+                              "set) -- final claims need scripts/evaluate_candidate.py on a "
+                              "registered confirmation set")
     parser.add_argument("--opponent-pool", choices=["mixed", "heuristic"], default="mixed",
                          help="'mixed' (default): each opponent seat draws a style per episode from "
                               "{heuristic, honest heuristic, search, random} (+ --pool-checkpoint); "
@@ -170,10 +174,10 @@ def main():
         # disjoint by construction so holdout NLL measures drift, not fit
         full = np.load(args.bc_anchor_dataset)
         n_full = full["type_idx"].shape[0]
-        rs = np.random.RandomState(args.seed)
-        perm = rs.permutation(n_full)
-        hold_idx = perm[:args.bc_holdout_samples]
-        anchor_pool = perm[args.bc_holdout_samples:]
+        # whole games held out when the dataset records game ids (audit F-21)
+        hold_idx, anchor_pool = split_by_game(
+            n_full, full["game_id"] if "game_id" in full.files else None,
+            args.bc_holdout_samples, seed=args.seed)
         anchor_idx = anchor_pool[:args.bc_anchor_samples]
         def take(idx):
             sub = {k: torch.as_tensor(full[k][np.sort(idx)], device=device) for k in full.files}
@@ -199,6 +203,9 @@ def main():
     history = [(0, win0, vp0)]
 
     per_seat = max(1, args.episodes_per_iter // NUM_PLAYERS)
+    check_training_seeds(args.seed * 1_000_000,
+                         args.seed * 1_000_000 + args.iterations * 1_000 + 3 * 250 + per_seat,
+                         "rl_finetune rollout")
     for it in range(1, args.iterations + 1):
         t0 = time.time()
         transitions = []

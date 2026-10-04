@@ -21,6 +21,7 @@ import time
 import numpy as np
 import torch
 
+from evaluation.seeds import check_training_seeds
 from agents.heuristic import HeuristicAgent
 from agents.random_agent import RandomAgent
 from env.engine import CatanEngine, total_vp
@@ -266,6 +267,7 @@ def main():
     env = CatanAECEnv(**env_kwargs) if args.num_workers <= 1 else None
 
     base_seed = args.seed
+    check_training_seeds(base_seed, base_seed + args.iterations * args.episodes_per_iter, "train_hier rollout")
     for iteration in range(1, args.iterations + 1):
         t0 = time.time()
         if args.num_workers <= 1:

@@ -21,7 +21,9 @@ import time
 import numpy as np
 import torch
 
-from training.imitation_data import batch_labels, batch_obs, is_graph_dataset, load_dataset, model_features
+from training.imitation_data import (
+    batch_labels, batch_obs, is_graph_dataset, load_dataset, model_features, split_by_game,
+)
 from training.model import observation_dim
 from training.train_hier import build_model
 
@@ -84,10 +86,11 @@ def main():
         f"dataset encoding ({'gnn' if is_graph_dataset(data) else 'hier'}) doesn't match "
         f"--model-type {args.model_type} -- collect the dataset with a matching --model-type.")
     n = data["type_idx"].shape[0]
-    perm = np.random.permutation(n)
-    n_val = int(n * args.val_frac)
-    val_idx, train_idx = perm[:n_val], perm[n_val:]
-    print(f"loaded {n} demonstrations ({len(train_idx)} train / {len(val_idx)} val)")
+    game_ids = data["game_id"].cpu().numpy() if "game_id" in data else None
+    val_idx, train_idx = split_by_game(n, game_ids, args.val_frac, seed=args.seed)
+    by_game = game_ids is not None and (game_ids >= 0).any()
+    print(f"loaded {n} demonstrations ({len(train_idx)} train / {len(val_idx)} val, "
+          f"split by {'game' if by_game else 'row -- dataset has no game ids'})")
 
     if args.model_type == "hier":
         obs_dim = observation_dim(public_hand_features=args.public_hand_features)

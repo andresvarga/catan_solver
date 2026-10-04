@@ -43,7 +43,11 @@ The findings below describe the code **as audited** (`6e6949a`). Since then:
 | Trade-bundle entropy | Averaged over the 10 bundle decisions | `4e09954` |
 | Diagnostics | PPO logs gradient norm and explained variance | `4e09954` |
 | F-09 hidden-info heuristic | `HonestHeuristicAgent` added (public-info only, equal strength); original kept as the eval baseline | `4e09954` |
-| F-12, F-19, F-21, F-23–F-29 | Open | — |
+| Evaluation protocol | **Done**: `evaluation/` + `scripts/evaluate_candidate.py` (all-seats-per-seed, opponent pool, Wilson CIs, paired McNemar/bootstrap comparison) | roadmap Phase 3 commit |
+| Seed registry | **Done**: named inloop/selection/confirm sets, training-overlap guard in every driver, confirmation-use log | roadmap Phase 3 commit |
+| F-19 random as a strength tier | **Fixed**: not a default evaluation opponent (smoke test only) | roadmap Phase 3 commit |
+| F-21 BC split by row | **Fixed**: datasets record `game_id`; BC validation and the RL anchor holdout hold out whole games | roadmap Phase 3 commit |
+| F-12, F-23–F-29 | Open | — |
 
 ## Executive Summary
 

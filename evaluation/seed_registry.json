@@ -1,0 +1,17 @@
+{
+  "_doc": "Named evaluation seed sets (board seeds; each seed is played once per seat). Training must never use seeds inside these sets -- training drivers check this. 'inloop' is reused by every in-training eval and is a selection signal only; 'selection' ranks candidates/checkpoints; 'confirm_*' back a claim and each should be used once per claim (usage is logged to seed_usage.jsonl). Ranges in 'reserved' are burned/used elsewhere and must not be reused for evaluation.",
+  "sets": {
+    "inloop":    {"bases": [40000000, 40100000], "count": 120, "purpose": "in-loop selection signal (rl_finetune --eval-seed-bases); never quote as a result"},
+    "selection": {"bases": [50000000], "count": 1000, "purpose": "choosing between candidates / checkpoints"},
+    "confirm_1": {"bases": [60000000], "count": 1000, "purpose": "confirmatory claim (use once per claim)"},
+    "confirm_2": {"bases": [61000000], "count": 1000, "purpose": "confirmatory claim (use once per claim)"},
+    "confirm_3": {"bases": [62000000], "count": 1000, "purpose": "confirmatory claim (use once per claim)"},
+    "confirm_4": {"bases": [63000000], "count": 1000, "purpose": "confirmatory claim (use once per claim)"},
+    "confirm_5": {"bases": [64000000], "count": 1000, "purpose": "confirmatory claim (use once per claim)"}
+  },
+  "reserved": [
+    {"start": 0,        "end": 3999999,  "use": "training rollouts / demo collection; legacy in-loop eval bases (800k, 2M, 700k)"},
+    {"start": 4000000,  "end": 9999999,  "use": "legacy confirmatory/in-loop eval bases (burned, see memory)"},
+    {"start": 10000000, "end": 39999999, "use": "audit 2026-10 fuzzing and tournaments (burned)"}
+  ]
+}

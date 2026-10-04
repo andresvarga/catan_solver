@@ -50,3 +50,41 @@ def model_features(model, obs_batch):
     if hasattr(model, "encode"):  # GraphActorCritic
         return model.encode(obs_batch)[0]
     return model.features(obs_batch)  # HierarchicalActorCritic
+
+
+def split_by_game(n_rows: int, game_ids: np.ndarray | None, holdout: float | int,
+                  seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """(holdout_idx, rest_idx) with whole games held out (audit F-21).
+
+    Decisions within one game are strongly correlated, so a random row split
+    leaks near-duplicates of training rows into validation and makes
+    validation NLL/accuracy optimistic. `holdout` is a fraction (< 1) or a
+    row count. Rows with game_id < 0 (unknown, e.g. older datasets) are split
+    row-wise as before."""
+    rng = np.random.RandomState(seed)
+    target = int(round(n_rows * holdout)) if holdout < 1 else int(holdout)
+    if game_ids is None:
+        game_ids = np.full(n_rows, -1, dtype=np.int64)
+    game_ids = np.asarray(game_ids)
+    known = np.flatnonzero(game_ids >= 0)
+    unknown = np.flatnonzero(game_ids < 0)
+    hold: list[np.ndarray] = []
+    if len(known):
+        games = np.unique(game_ids[known])
+        rng.shuffle(games)
+        frac_known = len(known) / n_rows
+        want_known = int(round(target * frac_known))
+        taken = 0
+        chosen = []
+        for g in games:
+            if taken >= want_known:
+                break
+            chosen.append(g)
+            taken += int((game_ids == g).sum())
+        hold.append(np.flatnonzero(np.isin(game_ids, chosen)))
+        target -= taken
+    if len(unknown) and target > 0:
+        hold.append(rng.permutation(unknown)[:target])
+    hold_idx = np.sort(np.concatenate(hold)) if hold else np.zeros(0, dtype=np.int64)
+    rest_idx = np.setdiff1d(np.arange(n_rows), hold_idx)
+    return hold_idx, rng.permutation(rest_idx)

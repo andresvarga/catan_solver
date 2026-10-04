@@ -33,6 +33,7 @@ from collections import OrderedDict, deque
 import numpy as np
 import torch
 
+from evaluation.seeds import check_training_seeds
 from agents.heuristic import HeuristicAgent
 from agents.random_agent import RandomAgent
 from env.engine import CatanEngine, total_vp
@@ -530,6 +531,7 @@ def main():
     if league.last_iteration:
         print(f"resuming at iteration {start_iteration} (league had completed {league.last_iteration})")
     base_seed = args.seed + (start_iteration - 1) * args.episodes_per_iter
+    check_training_seeds(base_seed, base_seed + args.iterations * args.episodes_per_iter, "league rollout")
 
     for iteration in range(start_iteration, start_iteration + args.iterations):
         t0 = time.time()
