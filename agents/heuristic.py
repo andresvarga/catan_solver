@@ -388,3 +388,34 @@ class HeuristicAgent:
             if counter is not None:
                 return counter
         return by_type[ActionType.REJECT_TRADE][0]
+
+
+class HonestHeuristicAgent(HeuristicAgent):
+    """HeuristicAgent with its two hidden-information reads replaced by
+    public-information equivalents: robber targeting uses *visible* VP (no
+    hidden VP cards), Monopoly uses the public card-count estimates instead of
+    opponents' true hands. Measured equal in strength to HeuristicAgent
+    (25.3% [24.0, 26.6] vs 3 of them, audit F-09) -- a legitimate opponent and
+    an imitable teacher."""
+
+    def _robber_score(self, state, action):
+        hex_id, victim = action.params["hex_id"], action.params["victim"]
+        if victim is None:
+            return -1.0
+        p = state.players[victim]
+        vis = p.visible_vp() + 2 * (state.longest_road_holder == victim) + 2 * (state.largest_army_holder == victim)
+        return hex_pip(state, hex_id) * (1.0 + 0.3 * vis)
+
+    def _maybe_play_monopoly(self, state, mono_actions):
+        if not mono_actions:
+            return None
+        _, missing = self._target(state)
+        best, best_haul = None, 0
+        for a in mono_actions:
+            r = a.params["resource"]
+            haul = sum(state.public_resource_estimates[pid][r] for pid in state.players if pid != self.player_id)
+            if haul > best_haul:
+                best, best_haul = a, haul
+        if best is not None and best_haul >= self.monopoly_min_haul and missing.get(best.params["resource"], 0) > 0:
+            return best
+        return None

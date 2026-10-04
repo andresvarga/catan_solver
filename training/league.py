@@ -131,11 +131,17 @@ class League:
             m.games_played += 1
 
     # -- promotion -----------------------------------------------------------------
-    def promotion_test(self, wins: int, games: int, win_rate_threshold: float = 0.55,
-                        alpha: float = 0.05) -> bool:
+    def promotion_test(self, wins: int, games: int, win_rate_threshold: float = 0.30,
+                        alpha: float = 0.05, parity: float = 0.25) -> bool:
+        """Promote only if the candidate's win rate clears `win_rate_threshold`
+        AND is significantly above `parity` -- the win rate of an
+        equal-strength player in the evaluation format. Promotion games are
+        1 candidate seat vs 3 copies of the main, so parity is 1/4; testing
+        against 0.5 (as this used to) demanded ~2.4x parity and made
+        promotion practically unreachable (audit F-17)."""
         if games == 0 or wins / games < win_rate_threshold:
             return False
-        p_value = binomial_test_pvalue(wins, games, p0=0.5)
+        p_value = binomial_test_pvalue(wins, games, p0=parity)
         return p_value < alpha
 
     def promote(self, name: str, iteration: int) -> None:

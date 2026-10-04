@@ -13,10 +13,15 @@ def test_binomial_test_pvalue_matches_known_values():
 
 
 def test_promotion_test_requires_both_win_rate_and_significance():
+    """Promotion matches are 1 candidate vs 3 copies of the main: parity is
+    25%, so significance is tested against 0.25 (audit F-17)."""
     league = League("/tmp/catan_league_test_promo")
-    assert league.promotion_test(wins=52, games=100) is False  # win rate below threshold
-    assert league.promotion_test(wins=6, games=10) is False  # win rate ok, too few games to be significant
-    assert league.promotion_test(wins=120, games=200) is True  # 60% win rate, clearly significant
+    assert league.promotion_test(wins=28, games=100) is False   # below the 30% threshold
+    assert league.promotion_test(wins=4, games=10) is False     # 40%, but n=10 isn't significant vs 25%
+    assert league.promotion_test(wins=45, games=120) is True    # 37.5%, clearly above parity
+    assert league.promotion_test(wins=31, games=100) is False   # clears threshold, not significant
+    # the old p0=0.5 test would have rejected all of these
+    assert league.promotion_test(wins=45, games=120, parity=0.5) is False
 
 
 def test_add_member_and_main_pointer():

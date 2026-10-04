@@ -47,12 +47,11 @@ def test_terminal_rewards_delivered_to_every_agent(seed):
     assert env.agents == []
     st = env.engine.state
     assert st.phase == Phase.GAME_OVER
-    # winner gets +1 unless tied on VP with someone else
-    vps = {p: total_vp(st, p) for p in st.players}
-    w = f"player_{st.winner}"
-    if list(vps.values()).count(vps[st.winner]) == 1:
-        assert rew[w] == pytest.approx(1.0)
-    assert sum(rew.values()) == pytest.approx(-0.5)  # 1 + 0 - 0.5 - 1, ties preserve the sum
+    # default win/loss reward: +1 winner, -1/3 each loser, zero-sum (F-16)
+    for pid in st.players:
+        expected = 1.0 if pid == st.winner else -1.0 / 3.0
+        assert rew[f"player_{pid}"] == pytest.approx(expected)
+    assert sum(rew.values()) == pytest.approx(0.0)
 
 
 def test_observations_within_declared_space():

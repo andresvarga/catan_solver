@@ -92,6 +92,7 @@ def env_kwargs_from_args(args: argparse.Namespace) -> dict:
         max_episode_steps=args.max_episode_steps,
         public_hand_features=args.public_hand_features,
         truncation_reward=getattr(args, "truncation_reward", "zero"),
+        terminal_reward=getattr(args, "terminal_reward", "win_loss"),
     )
 
 
@@ -331,6 +332,9 @@ def main():
     parser.add_argument("--max-episode-steps", type=int, default=4000,
                          help="step cap; heuristic games take ~1,100 steps (p90 ~1,450), so a "
                               "cap below ~2,500 truncates most games (audit F-06)")
+    parser.add_argument("--terminal-reward", choices=["win_loss", "rank"], default="win_loss",
+                         help="game-end reward: 'win_loss' (+1 winner, -1/3 each loser; default) or "
+                              "legacy 'rank' placement reward {1, 0, -0.5, -1} (audit F-16)")
     parser.add_argument("--truncation-reward", choices=["zero", "rank"], default="zero",
                          help="what a step-cap truncation pays: 'zero' (default; GAE bootstraps V(s_T)) or 'rank' (legacy rank-on-standing, pays the VP leader a full win -- audit F-06)")
     parser.add_argument("--vp-shaping-weight", type=float, default=0.05)
@@ -350,7 +354,9 @@ def main():
     parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--eval-games", type=int, default=30)
     parser.add_argument("--promotion-games", type=int, default=100)
-    parser.add_argument("--promotion-win-rate", type=float, default=0.55)
+    parser.add_argument("--promotion-win-rate", type=float, default=0.30,
+                         help="minimum win rate in the 1-vs-3 promotion match (parity = 0.25); the "
+                              "result must also be significantly above parity (binomial test)")
     parser.add_argument("--promotion-alpha", type=float, default=0.05)
     parser.add_argument("--bc-anchor-dataset", type=str, default=None,
                          help="demonstration .npz (scripts/collect_heuristic_demos.py) used as a "
@@ -594,7 +600,8 @@ def main():
         print(f"iter {iteration:4d} | {mode:<20s} | {len(transitions):5d} steps | {elapsed:5.1f}s | "
               f"turns={mean_turns:5.1f} finish={finish_rate:4.0%} | "
               f"pol={stats['policy_loss']:+.4f} val={stats['value_loss']:.4f} "
-              f"ent={stats['entropy']:.3f} kl={stats['approx_kl']:.4f}{bc_str}{holdout_str}")
+              f"ent={stats['entropy']:.3f} kl={stats['approx_kl']:.4f} "
+              f"gnorm={stats['grad_norm']:.2f} ev={stats['explained_variance']:.2f}{bc_str}{holdout_str}")
 
         # Crash-resilient checkpoint + persisted progress marker every
         # iteration -- both cheap (a few MB / a small JSON) relative to

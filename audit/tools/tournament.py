@@ -35,32 +35,7 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return (c - h, c + h)
 
 
-class HonestHeuristic(HeuristicAgent):
-    """HeuristicAgent with its two hidden-information reads replaced by
-    public-information equivalents (audit control for F-09)."""
-
-    def _robber_score(self, state, action):
-        from agents.heuristic import hex_pip
-        hex_id, victim = action.params["hex_id"], action.params["victim"]
-        if victim is None:
-            return -1.0
-        p = state.players[victim]
-        vis = p.visible_vp() + 2 * (state.longest_road_holder == victim) + 2 * (state.largest_army_holder == victim)
-        return hex_pip(state, hex_id) * (1.0 + 0.3 * vis)
-
-    def _maybe_play_monopoly(self, state, mono_actions):
-        if not mono_actions:
-            return None
-        _, missing = self._target(state)
-        best, best_haul = None, 0
-        for a in mono_actions:
-            r = a.params["resource"]
-            haul = sum(state.public_resource_estimates[pid][r] for pid in state.players if pid != self.player_id)
-            if haul > best_haul:
-                best, best_haul = a, haul
-        if best is not None and best_haul >= self.monopoly_min_haul and missing.get(best.params["resource"], 0) > 0:
-            return best
-        return None
+from agents.heuristic import HonestHeuristicAgent as HonestHeuristic  # moved to agents/ (roadmap Phase 2)
 
 
 _MODEL_CACHE = {}

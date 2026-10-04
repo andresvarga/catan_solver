@@ -56,8 +56,16 @@ class CatanAECEnv(AECEnv):
     def __init__(self, randomize_board: bool = True, seed: int | None = None,
                  allow_trading: bool = True, allow_dev_cards: bool = True,
                  vp_shaping_weight: float = 0.0, max_episode_steps: int | None = None,
-                 public_hand_features: bool = False, truncation_reward: str = "zero"):
+                 public_hand_features: bool = False, truncation_reward: str = "zero",
+                 terminal_reward: str = "win_loss"):
         super().__init__()
+        # What a real game end pays. "win_loss" (default): +1 to the winner,
+        # -1/3 to each loser -- zero-sum, and exactly the objective evaluation
+        # measures (win rate). "rank": legacy placement reward {+1, 0, -0.5,
+        # -1} by VP, which trades win probability for 2nd place (audit F-16).
+        if terminal_reward not in ("win_loss", "rank"):
+            raise ValueError(f"terminal_reward must be 'win_loss' or 'rank', got {terminal_reward!r}")
+        self._terminal_reward = terminal_reward
         # What a step-cap truncation pays. "zero" (default): nobody is paid --
         # a truncated game has no winner, and the training loop bootstraps
         # V(s_T) instead (training/ppo.compute_gae). "rank": legacy behaviour,
@@ -220,7 +228,10 @@ class CatanAECEnv(AECEnv):
             self._apply_vp_shaping(state)
 
         if state.phase == Phase.GAME_OVER:
-            self._assign_terminal_rewards()
+            if self._terminal_reward == "win_loss":
+                self._assign_win_loss_rewards()
+            else:
+                self._assign_terminal_rewards()
             self.terminations = {a: True for a in self.agents}
         elif self._max_episode_steps is not None and self._step_count >= self._max_episode_steps:
             if self._truncation_reward == "rank":
@@ -247,7 +258,25 @@ class CatanAECEnv(AECEnv):
                 self.rewards[_agent_name(pid)] += delta * self._vp_shaping_weight
             self._prev_vp[pid] = new_vp
 
+    def _assign_win_loss_rewards(self) -> None:
+        """+1 winner, -1/3 each other player (sums to zero). Final rank/VP
+        infos are still recorded for logging."""
+        state = self.engine.state
+        for pid in state.players:
+            self.rewards[_agent_name(pid)] += 1.0 if pid == state.winner else -1.0 / 3.0
+        self._record_final_standing()
+
+    def _record_final_standing(self) -> None:
+        state = self.engine.state
+        vps = {pid: total_vp(state, pid) for pid in state.players}
+        order = sorted(state.players, key=lambda pid: (pid != state.winner, -vps[pid]))
+        for rank, pid in enumerate(order, start=1):
+            self.infos[_agent_name(pid)]["final_rank"] = rank
+            self.infos[_agent_name(pid)]["final_vp"] = vps[pid]
+
     def _assign_terminal_rewards(self) -> None:
+        """Legacy rank-based reward (terminal_reward="rank", and
+        truncation_reward="rank")."""
         state = self.engine.state
         vps = {pid: total_vp(state, pid) for pid in state.players}
         ranking = sorted(state.players.keys(), key=lambda pid: vps[pid], reverse=True)

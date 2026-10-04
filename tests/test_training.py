@@ -65,7 +65,7 @@ def test_collect_episode_skips_forced_moves_and_bootstraps_truncation():
             else:
                 assert trs[-1]["terminated"] and "bootstrap_value" not in trs[-1]
         if max_steps is None:  # forced-move rewards are folded in, not dropped
-            assert abs(sum(rewards_seen.values()) - (-0.5)) < 1e-6
+            assert abs(sum(rewards_seen.values())) < 1e-6  # win/loss reward is zero-sum
         else:
             assert all(v == 0.0 for v in rewards_seen.values())
 

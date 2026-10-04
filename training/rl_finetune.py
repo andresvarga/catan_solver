@@ -1,5 +1,10 @@
-"""PPO fine-tuning directly on the evaluation condition: one trainee seat
-(rotated every batch) vs 3 plain HeuristicAgents.
+"""PPO fine-tuning with one trainee seat (rotated every batch) against a
+mixed opponent pool by default (agents/opponent_pool.py: heuristic, honest
+heuristic, search agent, random, optional past checkpoints), or -- with
+`--opponent-pool heuristic` -- the original condition of 3 plain
+HeuristicAgents. Training on one fixed bot optimises exploiting that bot;
+the pool trades a little of that for robustness to other styles. The
+in-loop evaluation is still vs 3 heuristics (seat-rotated).
 
 Why this exists (and why it isn't league_train): imitation has been squeezed
 dry -- the student matches the strongest buildable demonstrator (~55%
@@ -39,6 +44,7 @@ import numpy as np
 import torch
 
 from agents.heuristic import HeuristicAgent
+from agents.opponent_pool import PooledOpponent, builtin_members, checkpoint_member
 from env.state import NUM_PLAYERS
 from training.hier_ppo import (
     collect_rollout_parallel, compute_holdout_nll, load_bc_anchor, ppo_update,
@@ -90,6 +96,9 @@ def main():
     parser.add_argument("--max-episode-steps", type=int, default=4000,
                          help="step cap; heuristic games take ~1,100 steps (p90 ~1,450), so a "
                               "cap below ~2,500 truncates most games (audit F-06)")
+    parser.add_argument("--terminal-reward", choices=["win_loss", "rank"], default="win_loss",
+                         help="game-end reward: 'win_loss' (+1 winner, -1/3 each loser; default) or "
+                              "legacy 'rank' placement reward {1, 0, -0.5, -1} (audit F-16)")
     parser.add_argument("--truncation-reward", choices=["zero", "rank"], default="zero",
                          help="what a step-cap truncation pays: 'zero' (default; GAE bootstraps V(s_T)) or 'rank' (legacy rank-on-standing, pays the VP leader a full win -- audit F-06)")
     parser.add_argument("--bc-anchor-dataset", type=str, default=None)
@@ -109,6 +118,16 @@ def main():
     parser.add_argument("--eval-seed-bases", type=int, nargs=2, default=[4_700_000, 4_800_000],
                          help="in-loop selection signal only -- final claims need a "
                               "fresh-seed confirmatory on never-used bases")
+    parser.add_argument("--opponent-pool", choices=["mixed", "heuristic"], default="mixed",
+                         help="'mixed' (default): each opponent seat draws a style per episode from "
+                              "{heuristic, honest heuristic, search, random} (+ --pool-checkpoint); "
+                              "'heuristic': legacy 3x HeuristicAgent (the eval condition itself)")
+    parser.add_argument("--pool-weights", type=str, default=None,
+                         help="override pool weights, e.g. 'heuristic=0.5,search=0.5'")
+    parser.add_argument("--pool-checkpoint", action="append", default=[],
+                         help="add a frozen past checkpoint (same --model-type/--hidden) to the pool; "
+                              "repeatable")
+    parser.add_argument("--pool-checkpoint-weight", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
@@ -127,10 +146,23 @@ def main():
     model.eval()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    pool_members = None
+    if args.opponent_pool == "mixed":
+        weights = None
+        if args.pool_weights:
+            weights = {k: float(v) for k, v in (kv.split("=") for kv in args.pool_weights.split(","))}
+        pool_members = builtin_members(weights)
+        for path in args.pool_checkpoint:
+            pool_members.append(checkpoint_member(path, args.model_type, args.hidden, args.gnn_layers,
+                                                  args.pool_checkpoint_weight,
+                                                  public_hand_features=args.public_hand_features))
+        print("opponent pool: " + ", ".join(f"{m.name}={m.weight:g}" for m in pool_members), flush=True)
+
     env_kwargs = dict(randomize_board=True, allow_trading=True, allow_dev_cards=True,
                       vp_shaping_weight=0.0, max_episode_steps=args.max_episode_steps,
                       public_hand_features=args.public_hand_features,
-                      truncation_reward=args.truncation_reward)
+                      truncation_reward=args.truncation_reward,
+                      terminal_reward=args.terminal_reward)
 
     bc_anchor = holdout = None
     if args.bc_anchor_dataset:
@@ -171,18 +203,28 @@ def main():
         t0 = time.time()
         transitions = []
         finished = wins = 0
+        style_games: dict[str, int] = {}
+        style_wins: dict[str, int] = {}
         for seat in range(NUM_PLAYERS):
-            opponents = {pid: HeuristicAgent(pid, random.Random(args.seed * 917 + it * 31 + pid))
-                         for pid in range(NUM_PLAYERS) if pid != seat}
+            if pool_members is None:  # legacy: 3x the evaluation heuristic
+                opponents = {pid: HeuristicAgent(pid, random.Random(args.seed * 917 + it * 31 + pid))
+                             for pid in range(NUM_PLAYERS) if pid != seat}
+            else:
+                opponents = {pid: PooledOpponent(pid, pool_members,
+                                                 random.Random(args.seed * 917 + it * 31 + pid))
+                             for pid in range(NUM_PLAYERS) if pid != seat}
             base_seed = args.seed * 1_000_000 + it * 1_000 + seat * 250
             trs, summaries = collect_rollout_parallel(
                 env_kwargs, model, per_seat, base_seed, args.num_workers,
-                opponent_agents=opponents, opponent_name="heuristic", adapter=adapter,
+                opponent_agents=opponents, opponent_name=args.opponent_pool, adapter=adapter,
                 gamma=args.gamma, lam=args.gae_lambda)
             transitions.extend(trs)
             for s in summaries:
                 finished += 0 if s["truncated"] else 1
                 wins += 1 if s["winner"] == seat else 0
+                for style in set(s.get("opponent_styles", {}).values()):
+                    style_games[style] = style_games.get(style, 0) + 1
+                    style_wins[style] = style_wins.get(style, 0) + (s["winner"] == seat)
         t_roll = time.time() - t0
 
         model.to(device).train()
@@ -202,8 +244,13 @@ def main():
         print(f"iter {it:3d}: {len(transitions)} transitions, rollout wins {wins}/{n_ep} "
               f"(finished {finished}/{n_ep}) | pi={stats['policy_loss']:.4f} "
               f"v={stats['value_loss']:.4f} kl={stats['approx_kl']:.4f}{bc_str} "
+              f"gnorm={stats['grad_norm']:.2f} ev={stats['explained_variance']:.2f} "
               f"holdout_nll={nll:.4f} | roll {t_roll:.0f}s upd {time.time()-t0-t_roll:.0f}s",
               flush=True)
+        if pool_members is not None:  # trainee win rate in games where each style sat at the table
+            print("          pool: " + "  ".join(
+                f"{k.split('/')[-1]}={style_wins[k] / max(1, style_games[k]):.0%} (n={style_games[k]})"
+                for k in sorted(style_games)), flush=True)
         torch.save({"model": model.state_dict(), "iteration": it},
                    os.path.join(args.out_dir, "latest.pt"))
 

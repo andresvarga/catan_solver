@@ -357,8 +357,9 @@ def decode_trade(head: TradeCountHead, feats: torch.Tensor, template: Action, id
 
 
 def trade_logprob_entropy(head: TradeCountHead, feats: torch.Tensor, tb: dict):
-    """Per-row trade-bundle log-prob and entropy (zero for non-trade rows) --
-    the evaluate_actions side of decode_trade."""
+    """Per-row trade-bundle log-prob (joint) and entropy (mean over the
+    bundle's decisions); zero for non-trade rows -- the evaluate_actions side
+    of decode_trade."""
     n = feats.shape[0]
     lp = torch.zeros(n, device=feats.device)
     ent = torch.zeros(n, device=feats.device)
@@ -372,7 +373,11 @@ def trade_logprob_entropy(head: TradeCountHead, feats: torch.Tensor, tb: dict):
     logits = head(feats[rows], counts).masked_fill(tb["trade_masks"][rows] == 0, NEG_INF)
     dist = Categorical(logits=logits, validate_args=False)
     lp = lp.index_add(0, rows, dist.log_prob(counts).sum(-1))
-    ent = ent.index_add(0, rows, dist.entropy().sum(-1))
+    # Entropy is averaged (not summed) over the 10 bundle decisions so a trade
+    # contributes to the entropy bonus about as much as one pointer head --
+    # summed, it added up to ~10*ln4 nats and rewarded trade-happy policies.
+    # The log-prob above stays the exact joint (sum) for the PPO ratio.
+    ent = ent.index_add(0, rows, dist.entropy().mean(-1))
     return lp, ent
 
 

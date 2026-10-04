@@ -50,6 +50,9 @@ def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
         for seat, agent in (opponent_agents or {}).items():
+            if hasattr(agent, "reset_episode"):  # e.g. agents.opponent_pool.PooledOpponent
+                agent.reset_episode(seed * 1_000_003 + seat)
+                continue
             rng = getattr(agent, "rng", None)
             if rng is not None:
                 rng.seed(seed * 1_000_003 + seat)
@@ -157,6 +160,10 @@ def _episode_summary(env: CatanAECEnv, seed: int, opponent_agents: dict[int, obj
         "ranking_pids": ranking_pids,
         "trainee_pids": [pid for pid in state.players if pid not in opponent_agents],
         "opponent_name": opponent_name,
+        # which style sat in each opponent seat (pooled opponents), for
+        # per-style win-rate breakdowns
+        "opponent_styles": {pid: getattr(getattr(a, "current", None), "name", type(a).__name__)
+                            for pid, a in opponent_agents.items()},
     }
 
 
@@ -373,7 +380,8 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
 
     n = len(transitions)
     idx = np.arange(n)
-    stats = {"policy_loss": [], "value_loss": [], "entropy": [], "approx_kl": [], "clip_frac": []}
+    stats = {"policy_loss": [], "value_loss": [], "entropy": [], "approx_kl": [], "clip_frac": [],
+             "grad_norm": []}
     use_bc = bc_dataset is not None and bc_coef > 0
     if use_bc:
         stats["bc_loss"] = []
@@ -411,8 +419,9 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)  # pre-clip norm
             optimizer.step()
+            stats["grad_norm"].append(float(grad_norm))
 
             with torch.no_grad():
                 approx_kl = (old_logprob - logprob).mean().item()
@@ -430,4 +439,11 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
         if target_kl is not None and abs(float(np.mean(epoch_kls))) > target_kl:
             break
 
-    return {k: float(np.mean(v)) for k, v in stats.items()}
+    out = {k: float(np.mean(v)) for k, v in stats.items()}
+    # Explained variance of the rollout's value predictions w.r.t. their GAE
+    # return targets: ~0 means the critic explains nothing, 1 is perfect.
+    values = np.array([t["value"] for t in transitions], dtype=np.float64)
+    returns = np.array([t["return"] for t in transitions], dtype=np.float64)
+    var = returns.var()
+    out["explained_variance"] = float(1.0 - (returns - values).var() / var) if var > 1e-12 else float("nan")
+    return out

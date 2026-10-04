@@ -228,3 +228,29 @@ def test_counter_offer_is_observable_to_proposer():
     assert int(obs["counter_trade_proposer"][0]) == responder
     ctx = build_graph_observation(s, p0)["context"]
     assert ctx[25 + 4] > 0 and ctx[30 + 0] > 0 and ctx[35 + 2] == 1.0  # responder = next seat
+
+
+def test_terminal_reward_modes():
+    """Default 'win_loss': +1 winner, -1/3 each loser. Legacy 'rank': the
+    placement reward {1, 0, -0.5, -1}, winner always first (audit F-16)."""
+    for mode in ("win_loss", "rank"):
+        env = CatanAECEnv(randomize_board=True, seed=9, allow_trading=False, terminal_reward=mode)
+        env.reset(seed=9)
+        rng = random.Random(9)
+        totals = {a: 0.0 for a in env.possible_agents}
+        for agent in env.agent_iter(max_iter=20000):
+            obs, reward, terminated, truncated, info = env.last()
+            totals[agent] += reward
+            env.clear_reward(agent)
+            env.step(None if (terminated or truncated) else
+                     _weighted_masked_choice(obs["action_mask"], env.legal_actions(), rng))
+        st = env.engine.state
+        assert st.phase == Phase.GAME_OVER
+        winner = f"player_{st.winner}"
+        assert totals[winner] == pytest.approx(1.0)
+        if mode == "win_loss":
+            assert all(v == pytest.approx(-1 / 3) for a, v in totals.items() if a != winner)
+        else:
+            assert sum(totals.values()) == pytest.approx(-0.5)
+    with pytest.raises(ValueError):
+        CatanAECEnv(terminal_reward="vp")

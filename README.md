@@ -104,6 +104,16 @@ Python/env overhead anyway (GPU wouldn't help there).
   self-play with matches against a PFSP-sampled league opponent, snapshots
   historical checkpoints periodically, runs promotion evals, and can spin up
   short "main exploiter" side-sessions against the frozen current main.
+- `training/rl_finetune.py` — PPO fine-tuning of a checkpoint with one
+  trainee seat (rotated) against a mixed opponent pool by default
+  (`agents/opponent_pool.py`: heuristic, honest heuristic, search agent,
+  random, optional past checkpoints via `--pool-checkpoint`), or 3 plain
+  heuristics with `--opponent-pool heuristic`. In-loop evaluation is
+  seat-rotated vs 3 heuristics with Wilson CIs.
+- Rewards: games pay **+1 to the winner and -1/3 to each loser** by default
+  (`--terminal-reward win_loss`; legacy placement reward via `rank`). A
+  step-cap truncation pays nothing and GAE bootstraps V(s_T). Every run
+  writes `manifest.json` (git commit, args, versions) next to its checkpoints.
 - `training/agent.py` — `LearnedAgent` / `HierarchicalLearnedAgent`, wrapping
   a checkpoint behind the same `.choose(state)` interface as the other
   agents, for tournaments and league opponent seats alike.
@@ -179,9 +189,11 @@ episode to a clean trainee-vs-opponent 2-team comparison
 actual policy training (PPO trains on game rewards, not ratings) — only the
 rating/reporting numbers and PFSP sampling weights were affected. No
 promotion occurred in that 200-iteration run (35% win rate vs. the initial
-main in a 1-vs-3, short of the 55%-with-significance bar) — an appropriately
-cautious result given the bar is deliberately strict, not evidence the
-system is broken.
+main in a 1-vs-3, short of the 55%-with-significance bar). That bar was
+later found to be miscalibrated (audit F-17): parity in a 1-vs-3 match is 25%,
+not 50%, so the old test demanded ~2.4x parity and promotion was practically
+unreachable. The test now requires >= 30% *and* significance vs 25%; 35% over
+100 games would clear it.
 
 ## Known simplifications (documented in code, worth revisiting later)
 
