@@ -269,7 +269,17 @@ Every confirmed bug has a strict-xfail test that reproduces it and will flip whe
 <td><code>a686c21</code></td>
 </tr>
 <tr>
-<td><a class="fref" href="#f-12">F-12</a>, <a class="fref" href="#f-23">F-23</a>–<a class="fref" href="#f-29">F-29</a></td>
+<td><a class="fref" href="#f-25">F-25</a> GNN rollout throughput</td>
+<td><strong>Fixed</strong>: batched multi-game rollouts + NumPy sampling + spawned GPU inference workers; GNN 256x4 ~520 -&gt; ~3,570 transitions/s, flat model ~5,000 -&gt; ~13,850 (see README "Rollout throughput")</td>
+<td>roadmap Phase 4 commit</td>
+</tr>
+<tr>
+<td>Enum-keyed dicts</td>
+<td>Identity <code>__hash__</code> on the hot enums (dict lookups 2x faster); full int-array rewrite measured not worthwhile (~3% end-to-end)</td>
+<td>roadmap Phase 4 commit</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-12">F-12</a>, <a class="fref" href="#f-23">F-23</a>, <a class="fref" href="#f-24">F-24</a>, <a class="fref" href="#f-26">F-26</a>–<a class="fref" href="#f-29">F-29</a></td>
 <td>Open</td>
 <td>—</td>
 </tr>

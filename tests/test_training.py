@@ -140,5 +140,12 @@ def test_parallel_rollouts_reproduce_sequential_exactly():
         seq, _ = collect_rollout(CatanAECEnv(**kwargs), model, "cpu", 6, 500, opponent_agents=opponents)
         par2, _ = collect_rollout_parallel(kwargs, model, 6, 500, 2, opponent_agents=opponents)
         par3, _ = collect_rollout_parallel(kwargs, model, 6, 500, 3, opponent_agents=opponents)
-        assert sig(seq) == sig(par2) == sig(par3) and len(seq) > 100
-        assert close_logprobs(seq, par2) and close_logprobs(seq, par3)
+        # Phase 4: several games in flight with batched inference -- in-process
+        # and inside forked workers -- must not change the data either
+        bat1, _ = collect_rollout_parallel(kwargs, model, 6, 500, 1, opponent_agents=opponents,
+                                           envs_per_worker=4)
+        bat2, _ = collect_rollout_parallel(kwargs, model, 6, 500, 2, opponent_agents=opponents,
+                                           envs_per_worker=3)
+        assert sig(seq) == sig(par2) == sig(par3) == sig(bat1) == sig(bat2) and len(seq) > 100
+        for other in (par2, par3, bat1, bat2):
+            assert close_logprobs(seq, other)

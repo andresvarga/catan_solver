@@ -329,33 +329,6 @@ class TradeCountHead(nn.Module):
         return self.net(x)
 
 
-def decode_trade(head: TradeCountHead, feats: torch.Tensor, template: Action, idx1: int,
-                 deterministic: bool, legal_actions=None):
-    """Sample a concrete bundle for `template`. Returns (Action, logprob,
-    counts array, masks array)."""
-    device = feats.device
-    hand = template.params["hand"]
-    counts: list[int] = []
-    masks = []
-    logprob = 0.0
-    for k in range(TRADE_STEPS):
-        m = trade_step_mask(k, counts, hand)
-        prefix = torch.tensor([counts + [0] * (TRADE_STEPS - k)], dtype=torch.long, device=device)
-        logits = head(feats, prefix)[0, k]
-        c, lp = masked_sample(logits, torch.as_tensor(m, device=device), deterministic)
-        counts.append(c)
-        masks.append(m)
-        logprob += lp
-    give = {RESOURCE_LIST[i]: c for i, c in enumerate(counts[:RESOURCE_SIZE]) if c}
-    want = {RESOURCE_LIST[i]: c for i, c in enumerate(counts[RESOURCE_SIZE:]) if c}
-    if template.type == ActionType.PROPOSE_TRADE:
-        target = ALL_OPPONENTS if idx1 == PLAYER_SIZE - 1 else idx1
-        action = make_trade(template.type, give, want, actor=template.params["actor"], target=target)
-    else:
-        action = make_trade(template.type, give, want)
-    return action, logprob, np.array(counts, dtype=np.int64), np.stack(masks)
-
-
 def trade_logprob_entropy(head: TradeCountHead, feats: torch.Tensor, tb: dict):
     """Per-row trade-bundle log-prob (joint) and entropy (mean over the
     bundle's decisions); zero for non-trade rows -- the evaluate_actions side
@@ -387,21 +360,147 @@ def _pad(mask: np.ndarray) -> np.ndarray:
     return out
 
 
-def masked_sample(logits: torch.Tensor, mask: torch.Tensor, deterministic: bool) -> tuple[int, float]:
-    """Sample (or argmax) from a masked categorical without constructing a
-    torch.distributions.Categorical -- profiling showed the Distribution
-    machinery (arg validation, constraint checks, dispatch) dominates
-    single-sample rollout inference, while the math itself is three ops.
-    `logits`/`mask` are 1-D. Returns (index, log-prob of that index).
-    Gradient-free by design (`act` is rollout-side only; the gradient path
-    recomputes log-probs in `evaluate_actions`), hence the detach."""
-    logits = logits.detach().masked_fill(mask == 0, NEG_INF)
-    logp = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+def masked_sample_np(logits: np.ndarray, mask: np.ndarray, deterministic: bool,
+                     rng: np.random.Generator) -> tuple[int, float]:
+    """Sample (or argmax) from a masked categorical in NumPy. Rollout-side
+    only: tiny per-decision torch ops were ~90% of `act` time (Phase 4
+    profiling), and an explicit per-episode Generator keeps rollouts a pure
+    function of the episode seed however decisions are batched. Returns
+    (index, log-prob of that index); the gradient path recomputes log-probs
+    in torch (`evaluate_actions`)."""
+    l = np.where(mask > 0, logits.astype(np.float64), -np.inf)
+    mx = l.max()
+    z = np.exp(l - mx)
+    total = z.sum()
     if deterministic:
-        idx = int(torch.argmax(logits))
+        idx = int(np.argmax(l))
     else:
-        idx = int(torch.multinomial(torch.exp(logp), 1))
-    return idx, float(logp[idx])
+        idx = int(np.searchsorted(np.cumsum(z), rng.random() * total, side="right"))
+        idx = min(idx, len(z) - 1)
+        while z[idx] == 0.0:  # float edge at the very top of the cumsum
+            idx -= 1
+    return idx, float(l[idx] - mx - np.log(total))
+
+
+def _trade_mlp_np(head: "TradeCountHead"):
+    """Trade head weights as NumPy arrays (W1, b1, W2, b2), cached per call
+    of act_batch."""
+    lin1, lin2 = head.net[0], head.net[2]
+    return (lin1.weight.detach().float().cpu().numpy(), lin1.bias.detach().float().cpu().numpy(),
+            lin2.weight.detach().float().cpu().numpy(), lin2.bias.detach().float().cpu().numpy())
+
+
+def decode_trade(trade_mlp, feats_row: np.ndarray, template: Action, idx1: int,
+                 deterministic: bool, rng: np.random.Generator):
+    """Sample a concrete bundle for `template` (NumPy forward of
+    TradeCountHead; same function as its torch forward). Returns (Action,
+    logprob, counts array, masks array)."""
+    w1, b1, w2, b2 = trade_mlp
+    hidden = feats_row.shape[0]
+    base = w1[:, :hidden] @ feats_row + b1           # feature part, shared by all steps
+    w_prefix = w1[:, hidden:hidden + TRADE_STEPS]
+    w_step = w1[:, hidden + TRADE_STEPS:]
+    hand = template.params["hand"]
+    counts: list[int] = []
+    masks = []
+    logprob = 0.0
+    prefix = np.zeros(TRADE_STEPS, dtype=np.float32)
+    for k in range(TRADE_STEPS):
+        m = trade_step_mask(k, counts, hand)
+        h = np.maximum(base + w_prefix @ prefix + w_step[:, k], 0.0)
+        logits = w2 @ h + b2
+        c, lp = masked_sample_np(logits, m, deterministic, rng)
+        counts.append(c)
+        masks.append(m)
+        logprob += lp
+        prefix[k] = c / MAX_TRADE_CARDS_PER_SIDE
+    give = {RESOURCE_LIST[i]: c for i, c in enumerate(counts[:RESOURCE_SIZE]) if c}
+    want = {RESOURCE_LIST[i]: c for i, c in enumerate(counts[RESOURCE_SIZE:]) if c}
+    if template.type == ActionType.PROPOSE_TRADE:
+        target = ALL_OPPONENTS if idx1 == PLAYER_SIZE - 1 else idx1
+        action = make_trade(template.type, give, want, actor=template.params["actor"], target=target)
+    else:
+        action = make_trade(template.type, give, want)
+    return action, logprob, np.array(counts, dtype=np.int64), np.stack(masks)
+
+
+def sample_decision(row_logits: dict[str, np.ndarray], legal_actions: list[Action], deterministic: bool,
+                    rng: np.random.Generator, feats_row: np.ndarray, trade_mlp) -> tuple[Action, float, dict]:
+    """One decision from precomputed head logits (one batch row): type ->
+    stage-1/stage-2 pointers -> (trade bundle). Returns (Action, joint
+    logprob, head_data for storage)."""
+    by_type = group_by_type(legal_actions)
+    type_mask = np.zeros(NUM_ACTION_TYPES, dtype=np.float32)
+    for t in by_type:
+        type_mask[ACTION_TYPE_INDEX[t]] = 1.0
+    type_idx, logprob = masked_sample_np(row_logits["type"], type_mask, deterministic, rng)
+    chosen_type = ACTION_TYPES[type_idx]
+    actions_of_type = by_type[chosen_type]
+    stage1_head, stage2_head = TYPE_TO_HEADS[chosen_type]
+
+    idx1, idx2 = -1, -1
+    mask1_padded = np.zeros(SUBMASK_PAD, dtype=np.float32)
+    mask2_padded = np.zeros(SUBMASK_PAD, dtype=np.float32)
+    if stage1_head is not None:
+        mask1 = stage1_mask(chosen_type, actions_of_type)
+        idx1, lp1 = masked_sample_np(row_logits[stage1_head], mask1, deterministic, rng)
+        logprob += lp1
+        mask1_padded = _pad(mask1)
+        if stage2_head is not None:
+            mask2 = stage2_mask(chosen_type, actions_of_type, idx1)
+            idx2, lp2 = masked_sample_np(row_logits[stage2_head], mask2, deterministic, rng)
+            logprob += lp2
+            mask2_padded = _pad(mask2)
+
+    trade_counts, trade_masks = NO_TRADE_COUNTS, NO_TRADE_MASKS
+    if chosen_type in TRADE_TYPES:
+        action, lp_t, trade_counts, trade_masks = decode_trade(
+            trade_mlp, feats_row, actions_of_type[0], idx1, deterministic, rng)
+        logprob += lp_t
+    else:
+        action = match_action(chosen_type, actions_of_type,
+                              idx1 if idx1 != -1 else None, idx2 if idx2 != -1 else None)
+    head_data = {
+        "type_mask": type_mask, "type_idx": type_idx,
+        "stage1_head": stage1_head, "stage2_head": stage2_head,
+        "sub_mask_1": mask1_padded, "sub_idx_1": idx1,
+        "sub_mask_2": mask2_padded, "sub_idx_2": idx2,
+        "trade_counts": trade_counts, "trade_masks": trade_masks,
+    }
+    return action, logprob, head_data
+
+
+def _default_rng() -> np.random.Generator:
+    # No Generator given: derive one from torch's global RNG so callers that
+    # seed torch (torch.manual_seed) still get reproducible sampling.
+    return np.random.default_rng(int(torch.randint(0, 2 ** 62, (1,))))
+
+
+class ActorSampling:
+    """Shared rollout-side acting for both model families. Subclasses
+    implement `head_logits_batch(obs_batch) -> (feats np (B, hidden),
+    {head_name: np (B, size)} incl. "type", values np (B,))`."""
+
+    def act_batch(self, obs_batch, legal_lists: list[list[Action]], deterministic: bool = False,
+                  rngs: list[np.random.Generator] | None = None) -> list[tuple[Action, float, float, dict]]:
+        """One forward pass for the whole batch, then per-row NumPy sampling.
+        Returns [(Action, joint logprob, value, head_data)] in row order."""
+        with torch.inference_mode():
+            feats, logits, values = self.head_logits_batch(obs_batch)
+        trade_mlp = _trade_mlp_np(self.trade_head)
+        out = []
+        for i, legal in enumerate(legal_lists):
+            rng = rngs[i] if rngs is not None else _default_rng()
+            row = {k: v[i] for k, v in logits.items()}
+            action, logprob, head_data = sample_decision(row, legal, deterministic, rng, feats[i], trade_mlp)
+            out.append((action, logprob, float(values[i]), head_data))
+        return out
+
+    def act(self, obs_batch, legal_actions: list[Action], deterministic: bool = False,
+            rng: np.random.Generator | None = None) -> tuple[Action, float, float, dict]:
+        """Single decision: obs_batch holds one observation (batch dim 1)."""
+        return self.act_batch(obs_batch, [legal_actions], deterministic,
+                              [rng] if rng is not None else None)[0]
 
 
 def prepare_transition_batch(transitions: list[dict], device: str) -> dict[str, torch.Tensor]:
@@ -431,7 +530,7 @@ def prepare_transition_batch(transitions: list[dict], device: str) -> dict[str, 
     }
 
 
-class HierarchicalActorCritic(nn.Module):
+class HierarchicalActorCritic(ActorSampling, nn.Module):
     def __init__(self, obs_dim: int, hidden: int = 256):
         super().__init__()
         self.obs_dim = obs_dim
@@ -465,62 +564,16 @@ class HierarchicalActorCritic(nn.Module):
         feats = self.features(obs_batch)
         return self.value_head(feats).squeeze(-1)
 
-    def act(self, obs_tensor: torch.Tensor, legal_actions: list[Action],
-            deterministic: bool = False) -> tuple[Action, float, float, dict]:
-        """obs_tensor: shape (1, obs_dim). Returns (concrete Action, joint logprob,
-        value, head_data-for-storage)."""
-        device = obs_tensor.device
-        feats = self.features(obs_tensor)  # (1, hidden)
-        by_type = group_by_type(legal_actions)
-
-        type_mask = np.zeros(NUM_ACTION_TYPES, dtype=np.float32)
-        for t in by_type:
-            type_mask[ACTION_TYPE_INDEX[t]] = 1.0
-        type_mask_t = torch.as_tensor(type_mask, device=device)
-
-        type_logits = self.type_head(feats).squeeze(0)
-        type_idx, logprob = masked_sample(type_logits, type_mask_t, deterministic)
-
-        chosen_type = ACTION_TYPES[type_idx]
-        actions_of_type = by_type[chosen_type]
-        stage1_head, stage2_head = TYPE_TO_HEADS[chosen_type]
-
-        idx1, idx2 = -1, -1
-        mask1_padded = np.zeros(SUBMASK_PAD, dtype=np.float32)
-        mask2_padded = np.zeros(SUBMASK_PAD, dtype=np.float32)
-
-        if stage1_head is not None:
-            mask1 = stage1_mask(chosen_type, actions_of_type)
-            logits1 = self._head_modules[stage1_head](feats).squeeze(0)
-            idx1, lp1 = masked_sample(logits1, torch.as_tensor(mask1, device=device), deterministic)
-            logprob += lp1
-            mask1_padded = _pad(mask1)
-
-            if stage2_head is not None:
-                mask2 = stage2_mask(chosen_type, actions_of_type, idx1)
-                logits2 = self._head_modules[stage2_head](feats).squeeze(0)
-                idx2, lp2 = masked_sample(logits2, torch.as_tensor(mask2, device=device), deterministic)
-                logprob += lp2
-                mask2_padded = _pad(mask2)
-
-        trade_counts, trade_masks = NO_TRADE_COUNTS, NO_TRADE_MASKS
-        if chosen_type in TRADE_TYPES:
-            result_action, lp_t, trade_counts, trade_masks = decode_trade(
-                self.trade_head, feats, actions_of_type[0], idx1, deterministic, legal_actions)
-            logprob += lp_t
-        else:
-            result_action = match_action(chosen_type, actions_of_type,
-                                          idx1 if idx1 != -1 else None, idx2 if idx2 != -1 else None)
-        value = self.value_head(feats).squeeze(0).squeeze(-1)
-
-        head_data = {
-            "type_mask": type_mask, "type_idx": type_idx,
-            "stage1_head": stage1_head, "stage2_head": stage2_head,
-            "sub_mask_1": mask1_padded, "sub_idx_1": idx1,
-            "sub_mask_2": mask2_padded, "sub_idx_2": idx2,
-            "trade_counts": trade_counts, "trade_masks": trade_masks,
-        }
-        return result_action, logprob, float(value.item()), head_data
+    def head_logits_batch(self, obs_batch: torch.Tensor):
+        """Every head's logits for the whole batch in one pass (moved to
+        host NumPy once) -- see ActorSampling."""
+        feats = self.features(obs_batch)
+        logits = {"type": self.type_head(feats)}
+        for name, mod in self._head_modules.items():
+            logits[name] = mod(feats)
+        values = self.value_head(feats).squeeze(-1)
+        return (feats.float().cpu().numpy(), {k: v.float().cpu().numpy() for k, v in logits.items()},
+                values.float().cpu().numpy())
 
     def evaluate_actions(self, obs_batch: torch.Tensor, transitions) -> tuple[
             torch.Tensor, torch.Tensor, torch.Tensor]:

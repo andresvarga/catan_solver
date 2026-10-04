@@ -133,6 +133,25 @@ python3 -m training.league_train --iterations 200 --num-workers 12 \
   --init-checkpoint <a training_hier checkpoint>.pt --eval-every 25
 ```
 
+## Rollout throughput
+
+Rollout workers run several games each (`--envs-per-worker`, default 4) with
+one batched forward pass per round, and action sampling happens in NumPy
+from a per-episode generator, so data is identical for any worker/batch
+configuration. For the GNN, put inference on the GPU with
+`--rollout-device cuda` (spawned workers, one CUDA context each). Measured
+self-play rollout throughput (transitions/s, RTX 3060 + 16 cores,
+`audit/tools/bench_rollouts.py`):
+
+| model | before Phase 4 | CPU, 12 workers x 4 games | GPU workers |
+|---|---:|---:|---:|
+| flat hier h=256 | ~5,000 | **13,850** | 10,450 (6 x 32) |
+| GNN h=128 L=3 | ~1,570 | 1,910 | **5,130** (4 x 32) |
+| GNN h=256 L=4 | ~520 | 600 | **3,570** (4 x 32) |
+
+Use CPU workers for the flat model and `--rollout-device cuda --num-workers 4
+--envs-per-worker 32` for the GNN.
+
 ## Evaluating a policy
 
 Use the standard protocol (`scripts/evaluate_candidate.py`, library in

@@ -14,6 +14,10 @@ from enum import Enum
 
 
 class Resource(Enum):
+    # identity hash (C-level): members are singletons compared by identity, and the
+    # default Enum.__hash__ is a Python-level call that showed up as ~12% of rollout time
+    __hash__ = object.__hash__
+
     WOOD = "wood"
     BRICK = "brick"
     SHEEP = "sheep"
@@ -22,6 +26,10 @@ class Resource(Enum):
 
 
 class HexType(Enum):
+    # identity hash (C-level): members are singletons compared by identity, and the
+    # default Enum.__hash__ is a Python-level call that showed up as ~12% of rollout time
+    __hash__ = object.__hash__
+
     WOOD = "wood"
     BRICK = "brick"
     SHEEP = "sheep"

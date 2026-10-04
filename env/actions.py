@@ -13,6 +13,10 @@ from env.board import Resource
 
 
 class ActionType(Enum):
+    # identity hash (C-level): members are singletons compared by identity, and the
+    # default Enum.__hash__ is a Python-level call that showed up as ~12% of rollout time
+    __hash__ = object.__hash__
+
     ROLL_DICE = "roll_dice"
     BUILD_ROAD = "build_road"
     BUILD_SETTLEMENT = "build_settlement"

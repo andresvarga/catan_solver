@@ -132,6 +132,13 @@ def main():
                          help="add a frozen past checkpoint (same --model-type/--hidden) to the pool; "
                               "repeatable")
     parser.add_argument("--pool-checkpoint-weight", type=float, default=0.15)
+    parser.add_argument("--envs-per-worker", type=int, default=4,
+                         help="games each rollout worker plays concurrently, with one batched forward "
+                              "pass per round (Phase 4); data is identical for any value")
+    parser.add_argument("--rollout-device", type=str, default="cpu",
+                         help="device for rollout inference: 'cpu' (forked workers) or 'cuda' "
+                              "(spawned GPU workers; ~3-7x faster for the GNN, slower for the flat "
+                              "model). With --num-workers 1 it runs in-process.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
@@ -224,7 +231,8 @@ def main():
             trs, summaries = collect_rollout_parallel(
                 env_kwargs, model, per_seat, base_seed, args.num_workers,
                 opponent_agents=opponents, opponent_name=args.opponent_pool, adapter=adapter,
-                gamma=args.gamma, lam=args.gae_lambda)
+                gamma=args.gamma, lam=args.gae_lambda,
+                envs_per_worker=args.envs_per_worker, inference_device=args.rollout_device)
             transitions.extend(trs)
             for s in summaries:
                 finished += 0 if s["truncated"] else 1

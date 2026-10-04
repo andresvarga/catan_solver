@@ -219,6 +219,13 @@ def main():
                          help="'hier' = flat-vector trunk (phase 4), 'gnn' = graph-encoded "
                               "board with pointer heads over node embeddings (phase 6)")
     parser.add_argument("--gnn-layers", type=int, default=3, help="only used when --model-type gnn")
+    parser.add_argument("--envs-per-worker", type=int, default=4,
+                         help="games each rollout worker plays concurrently, with one batched forward "
+                              "pass per round (Phase 4); data is identical for any value")
+    parser.add_argument("--rollout-device", type=str, default="cpu",
+                         help="device for rollout inference: 'cpu' (forked workers) or 'cuda' "
+                              "(spawned GPU workers; ~3-7x faster for the GNN, slower for the flat "
+                              "model). With --num-workers 1 it runs in-process.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gamma", type=float, default=GAMMA)
     parser.add_argument("--gae-lambda", type=float, default=GAE_LAMBDA)
@@ -270,13 +277,14 @@ def main():
     check_training_seeds(base_seed, base_seed + args.iterations * args.episodes_per_iter, "train_hier rollout")
     for iteration in range(1, args.iterations + 1):
         t0 = time.time()
-        if args.num_workers <= 1:
+        if args.num_workers <= 1 and args.envs_per_worker <= 1 and args.rollout_device == "cpu":
             transitions, summaries = collect_rollout(env, model, "cpu", args.episodes_per_iter, base_seed,
                                                        adapter=adapter, gamma=args.gamma, lam=args.gae_lambda)
         else:
             transitions, summaries = collect_rollout_parallel(
                 env_kwargs, model, args.episodes_per_iter, base_seed, args.num_workers, adapter=adapter,
-                gamma=args.gamma, lam=args.gae_lambda)
+                gamma=args.gamma, lam=args.gae_lambda,
+                envs_per_worker=args.envs_per_worker, inference_device=args.rollout_device)
         base_seed += args.episodes_per_iter
         model.to(device)
         stats = ppo_update(model, optimizer, transitions, epochs=args.epochs,

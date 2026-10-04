@@ -297,11 +297,12 @@ def run_exploiter_session(league: League, args: argparse.Namespace, iteration: i
                                                           model_kind=args.model_type,
                                                           public_hand_features=args.public_hand_features)
                             for pid in opponent_seats}
-        if args.num_workers > 1:
+        if args.num_workers > 1 or args.envs_per_worker > 1 or args.rollout_device != "cpu":
             transitions, _ = collect_rollout_parallel(env_kwargs, exploiter_model, args.episodes_per_iter,
                                                         base_seed, args.num_workers,
                                                         opponent_agents=opponent_agents, opponent_name=main_member.name,
-                                                        adapter=adapter, gamma=args.gamma, lam=args.gae_lambda)
+                                                        adapter=adapter, gamma=args.gamma, lam=args.gae_lambda,
+                envs_per_worker=args.envs_per_worker, inference_device=args.rollout_device)
         else:
             env = CatanAECEnv(**env_kwargs)
             transitions, _ = collect_rollout(env, exploiter_model, "cpu", args.episodes_per_iter, base_seed,
@@ -432,6 +433,13 @@ def main():
                          help="'hier' = flat-vector trunk (phase 4), 'gnn' = graph-encoded "
                               "board with pointer heads over node embeddings (phase 6)")
     parser.add_argument("--gnn-layers", type=int, default=3, help="only used when --model-type gnn")
+    parser.add_argument("--envs-per-worker", type=int, default=4,
+                         help="games each rollout worker plays concurrently, with one batched forward "
+                              "pass per round (Phase 4); data is identical for any value")
+    parser.add_argument("--rollout-device", type=str, default="cpu",
+                         help="device for rollout inference: 'cpu' (forked workers) or 'cuda' "
+                              "(spawned GPU workers; ~3-7x faster for the GNN, slower for the flat "
+                              "model). With --num-workers 1 it runs in-process.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--gamma", type=float, default=GAMMA)
     parser.add_argument("--gae-lambda", type=float, default=GAE_LAMBDA)
@@ -544,11 +552,12 @@ def main():
             opponent_seats = [p for p in range(NUM_PLAYERS) if p != trainee_seat]
             opponent_agents = make_seat_agents(opp_member, opponent_seats, args, rng)
 
-        if args.num_workers > 1:
+        if args.num_workers > 1 or args.envs_per_worker > 1 or args.rollout_device != "cpu":
             transitions, summaries = collect_rollout_parallel(
                 env_kwargs, model, args.episodes_per_iter, base_seed, args.num_workers,
                 opponent_agents=opponent_agents, opponent_name=opponent_name, adapter=adapter,
-                gamma=args.gamma, lam=args.gae_lambda)
+                gamma=args.gamma, lam=args.gae_lambda,
+                envs_per_worker=args.envs_per_worker, inference_device=args.rollout_device)
         else:
             env = CatanAECEnv(**env_kwargs)
             transitions, summaries = collect_rollout(

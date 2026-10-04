@@ -24,8 +24,11 @@ rather than a duplicated `gnn_ppo.py`.
 """
 from __future__ import annotations
 
+import copy
 import multiprocessing as mp
 import os
+import random
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import torch
@@ -38,100 +41,151 @@ from training.model_adapters import FLAT_ADAPTER, ModelAdapter
 from training.ppo import GAE_LAMBDA, GAMMA, compute_gae
 
 
-def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
-                     opponent_agents: dict[int, object] | None = None,
-                     adapter: ModelAdapter = FLAT_ADAPTER,
-                     skip_forced: bool = True) -> dict:
-    """Play one episode, seeding policy sampling (torch) and every opponent's
-    `rng` from `seed`, so the episode is a pure function of (weights, seed) no
-    matter which worker process plays it or in what order -- parallel and
-    sequential rollouts give identical data (audit F-22). The caller's global
-    torch RNG state is restored afterwards."""
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed)
-        for seat, agent in (opponent_agents or {}).items():
-            if hasattr(agent, "reset_episode"):  # e.g. agents.opponent_pool.PooledOpponent
-                agent.reset_episode(seed * 1_000_003 + seat)
-                continue
-            rng = getattr(agent, "rng", None)
-            if rng is not None:
-                rng.seed(seed * 1_000_003 + seat)
-        return _collect_episode(env, model, device, seed, opponent_agents, adapter, skip_forced)
+def _episode_opponents(opponent_agents: dict[int, object] | None, seed: int) -> dict[int, object]:
+    """Per-episode opponent instances seeded from the episode seed. Shallow
+    copies (models and pool members stay shared) with fresh RNG state, so
+    episodes running concurrently in one process never share an RNG stream."""
+    out = {}
+    for seat, agent in (opponent_agents or {}).items():
+        a = copy.copy(agent)
+        s = seed * 1_000_003 + seat
+        if hasattr(a, "reset_episode"):  # e.g. agents.opponent_pool.PooledOpponent
+            a.reset_episode(s)
+        elif getattr(a, "rng", None) is not None:
+            a.rng = random.Random(s)
+        out[seat] = a
+    return out
 
 
-def _collect_episode(env: CatanAECEnv, model, device: str, seed: int,
-                     opponent_agents: dict[int, object] | None,
-                     adapter: ModelAdapter, skip_forced: bool) -> dict:
-    """Episode body (see collect_episode). Returns each trainee seat's own
-    transition list.
+class EpisodeRunner:
+    """One episode as a resumable state machine: `advance()` plays forced
+    moves, opponent seats and dead-agent steps until a trainee decision is
+    needed (returning its encoded observation + legal actions) or the game
+    ends (returning None); `apply()` records the model's decision and steps.
 
     `skip_forced`: decisions with exactly one legal action (ROLL_DICE with no
     playable dev card, a lone discard/robber option, ...) carry no policy
     gradient but, if stored, each still costs one step of discount -- ~20% of
-    all transitions (audit F-15). With skip_forced they are played without
-    querying the model, and any reward earned across them accrues to the
-    agent's previous real decision. On truncation each trainee's last
-    transition records `bootstrap_value` = V(s_T) for compute_gae."""
-    opponent_agents = opponent_agents or {}
-    env.reset(seed=seed)
-    pending: dict[str, dict] = {}
-    episode_data: dict[str, list] = {a: [] for a in env.possible_agents}
+    all transitions (audit F-15). They are played without querying the
+    model, and reward earned across them accrues to the agent's previous real
+    decision. On truncation each trainee's last transition records
+    `bootstrap_value` = V(s_T) for compute_gae.
 
-    def finalize(agent: str, terminated: bool, truncated: bool) -> None:
-        p = pending.pop(agent)
-        episode_data[agent].append({**p, "terminated": terminated, "truncated": truncated,
-                                    "done": terminated or truncated})
+    All randomness comes from `seed` (board/dice via the env, policy sampling
+    via a per-episode NumPy Generator, opponents via `_episode_opponents`),
+    so an episode is a pure function of (weights, seed) regardless of how
+    many episodes are batched together or which process plays it (F-22)."""
 
-    while env.agents:
-        agent = env.agent_selection
-        pid = int(agent.split("_")[1])
-        # Skip building PettingZoo's own flat observation dict whenever
-        # nothing below will read it: the graph adapter derives everything
-        # from env.engine.state instead (profiling showed this is ~15% of
-        # GNN rollout time otherwise spent building a value nothing ever
-        # reads), and an opponent-controlled seat picks its action straight
-        # from env.engine.state too, regardless of adapter.
-        needs_obs = adapter.needs_raw_obs and pid not in opponent_agents
-        obs, reward, term, trunc, info = env.last(observe=needs_obs)
-        env.clear_reward(agent)
-        done = term or trunc
+    def __init__(self, env: CatanAECEnv, model, device: str, seed: int,
+                 opponent_agents: dict[int, object] | None, adapter: ModelAdapter,
+                 skip_forced: bool = True):
+        self.env, self.model, self.device, self.seed = env, model, device, seed
+        self.adapter, self.skip_forced = adapter, skip_forced
+        self.opponents = _episode_opponents(opponent_agents, seed)
+        self.rng = np.random.default_rng(seed)
+        self.pending: dict[str, dict] = {}
+        self.data: dict[str, list] = {a: [] for a in env.possible_agents}
+        self._decision = None  # (agent, encoded, legal) awaiting apply()
+        env.reset(seed=seed)
 
-        if agent in pending:
-            pending[agent]["reward"] += reward
+    def _finalize(self, agent: str, terminated: bool, truncated: bool) -> None:
+        p = self.pending.pop(agent)
+        self.data[agent].append({**p, "terminated": terminated, "truncated": truncated,
+                                 "done": terminated or truncated})
 
-        if done:
-            if agent in pending:
-                if trunc and not term:
-                    encoded = adapter.encode(env, obs, pid)
-                    with torch.inference_mode():
-                        pending[agent]["bootstrap_value"] = float(
-                            model.value(adapter.to_single(encoded, device)).reshape(-1)[0])
-                finalize(agent, term, trunc)
-            action_idx = None
-        elif pid in opponent_agents:
-            # Pass the env's cached legal-action list through so the agent
-            # doesn't re-enumerate it, and so its chosen Action is (usually)
-            # the same object -- making the .index() lookup an identity scan.
+    def advance(self):
+        env = self.env
+        while env.agents:
+            agent = env.agent_selection
+            pid = int(agent.split("_")[1])
+            # Skip building PettingZoo's flat observation dict when nothing
+            # reads it (graph adapter, opponent seats) -- ~15% of GNN rollout time.
+            needs_obs = self.adapter.needs_raw_obs and pid not in self.opponents
+            obs, reward, term, trunc, info = env.last(observe=needs_obs)
+            env.clear_reward(agent)
+            if agent in self.pending:
+                self.pending[agent]["reward"] += reward
+            if term or trunc:
+                if agent in self.pending:
+                    if trunc and not term:
+                        encoded = self.adapter.encode(env, obs, pid)
+                        with torch.inference_mode():
+                            self.pending[agent]["bootstrap_value"] = float(
+                                self.model.value(self.adapter.to_single(encoded, self.device)).reshape(-1)[0])
+                    self._finalize(agent, term, trunc)
+                env.step(None)
+                continue
             legal = env.legal_actions()
-            concrete_action = opponent_agents[pid].choose(env.engine.state, legal)
-            action_idx = _env_action(legal, concrete_action)
-        else:
-            legal = env.legal_actions()
-            if skip_forced and len(legal) == 1:
-                action_idx = 0  # forced move: no transition, reward accrues to the pending one
+            if pid in self.opponents:
+                env.step(_env_action(legal, self.opponents[pid].choose(env.engine.state, legal)))
+                continue
+            if self.skip_forced and len(legal) == 1:
+                env.step(0)  # forced: no transition; reward accrues to the pending one
+                continue
+            if agent in self.pending:
+                self._finalize(agent, False, False)
+            encoded = self.adapter.encode(env, obs, pid)
+            self._decision = (agent, encoded, legal)
+            return encoded, legal
+        return None
+
+    def apply(self, action, logprob: float, value: float, head_data: dict) -> None:
+        agent, encoded, legal = self._decision
+        self._decision = None
+        self.pending[agent] = {"obs": encoded, "logprob": logprob, "value": value,
+                               "reward": 0.0, **head_data}
+        self.env.step(_env_action(legal, action))
+
+
+def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
+                     opponent_agents: dict[int, object] | None = None,
+                     adapter: ModelAdapter = FLAT_ADAPTER,
+                     skip_forced: bool = True) -> dict:
+    """Play one episode; returns each trainee seat's own transition list
+    (see EpisodeRunner)."""
+    runner = EpisodeRunner(env, model, device, seed, opponent_agents, adapter, skip_forced)
+    while (need := runner.advance()) is not None:
+        encoded, legal = need
+        action, logprob, value, head_data = model.act(adapter.to_single(encoded, device), legal,
+                                                      rng=runner.rng)
+        runner.apply(action, logprob, value, head_data)
+    return runner.data
+
+
+def collect_episodes_batched(env_kwargs: dict, model, device: str, seeds: list[int],
+                             opponent_agents: dict[int, object] | None = None,
+                             adapter: ModelAdapter = FLAT_ADAPTER, num_envs: int = 16,
+                             skip_forced: bool = True):
+    """Play `seeds` with up to `num_envs` games in flight, one batched
+    forward pass per round of pending trainee decisions (Phase 4). Yields
+    each finished EpisodeRunner (.seed, .data, .env, .opponents); per-episode
+    results are identical to `collect_episode` on the same seed."""
+    queue = list(seeds)
+    active: list[EpisodeRunner] = []
+
+    def start():
+        seed = queue.pop(0)
+        return EpisodeRunner(CatanAECEnv(**env_kwargs), model, device, seed, opponent_agents,
+                             adapter, skip_forced)
+
+    while queue or active:
+        while queue and len(active) < num_envs:
+            active.append(start())
+        waiting, needs = [], []
+        for r in active:
+            need = r.advance()
+            if need is None:
+                yield r
             else:
-                if agent in pending:
-                    finalize(agent, False, False)
-                encoded = adapter.encode(env, obs, pid)
-                obs_t = adapter.to_single(encoded, device)
-                with torch.inference_mode():
-                    concrete_action, logprob, value, head_data = model.act(obs_t, legal, deterministic=False)
-                action_idx = _env_action(legal, concrete_action)
-                pending[agent] = {"obs": encoded, "logprob": logprob, "value": value,
-                                  "reward": 0.0, **head_data}
-        env.step(action_idx)
-
-    return episode_data
+                waiting.append(r)
+                needs.append(need)
+        active = waiting
+        if not waiting:
+            continue
+        batch = adapter.to_batch([enc for enc, _ in needs], device)
+        results = model.act_batch(batch, [legal for _, legal in needs], rngs=[r.rng for r in waiting])
+        for r, (action, logprob, value, head_data) in zip(waiting, results):
+            r.apply(action, logprob, value, head_data)
 
 
 def _env_action(legal: list, action):
@@ -167,22 +221,41 @@ def _episode_summary(env: CatanAECEnv, seed: int, opponent_agents: dict[int, obj
     }
 
 
+def _runner_output(r: "EpisodeRunner", opponent_name, gamma, lam) -> tuple[int, list[dict], dict]:
+    transitions: list[dict] = []
+    for agent, trs in r.data.items():
+        if trs:
+            transitions.extend(compute_gae(trs, gamma=gamma, lam=lam))
+    return r.seed, transitions, _episode_summary(r.env, r.seed, r.opponents, opponent_name)
+
+
+def _assemble(episodes) -> tuple[list[dict], list[dict]]:
+    # Seed order == the order sequential collection produces, so the PPO
+    # update sees identical data however episodes were split or batched (F-22).
+    all_transitions: list[dict] = []
+    all_summaries: list[dict] = []
+    for _, transitions, summary in sorted(episodes, key=lambda ep: ep[0]):
+        all_transitions.extend(transitions)
+        all_summaries.append(summary)
+    return all_transitions, all_summaries
+
+
 def collect_rollout(env: CatanAECEnv, model, device: str,
                      num_episodes: int, base_seed: int,
                      opponent_agents: dict[int, object] | None = None,
                      opponent_name: str | None = None,
                      adapter: ModelAdapter = FLAT_ADAPTER,
                      gamma: float = GAMMA, lam: float = GAE_LAMBDA) -> tuple[list[dict], list[dict]]:
-    all_transitions = []
-    episode_summaries = []
+    """Sequential, one game at a time on `env` (reference implementation;
+    collect_rollout_parallel produces identical data faster)."""
+    episodes = []
     for i in range(num_episodes):
-        seed = base_seed + i
-        episode_data = collect_episode(env, model, device, seed, opponent_agents=opponent_agents, adapter=adapter)
-        for agent, transitions in episode_data.items():
-            if transitions:
-                all_transitions.extend(compute_gae(transitions, gamma=gamma, lam=lam))
-        episode_summaries.append(_episode_summary(env, seed, opponent_agents, opponent_name))
-    return all_transitions, episode_summaries
+        r = EpisodeRunner(env, model, device, base_seed + i, opponent_agents, adapter)
+        while (need := r.advance()) is not None:
+            encoded, legal = need
+            r.apply(*model.act(adapter.to_single(encoded, device), legal, rng=r.rng))
+        episodes.append(_runner_output(r, opponent_name, gamma, lam))
+    return _assemble(episodes)
 
 
 # -- parallel rollout collection -------------------------------------------
@@ -210,6 +283,8 @@ _worker_opponent_name: str | None = None
 _worker_adapter: ModelAdapter = FLAT_ADAPTER
 _worker_gamma: float = GAMMA
 _worker_lam: float = GAE_LAMBDA
+_worker_num_envs: int = 1
+_worker_device: str = "cpu"
 
 
 def reseed_forked_worker(opponent_agents: dict[int, object] | None = None) -> None:
@@ -235,37 +310,32 @@ def reseed_forked_worker(opponent_agents: dict[int, object] | None = None) -> No
 
 def _init_worker(model, env_kwargs: dict, opponent_agents: dict[int, object] | None,
                   opponent_name: str | None, adapter: ModelAdapter,
-                  gamma: float = GAMMA, lam: float = GAE_LAMBDA) -> None:
+                  gamma: float = GAMMA, lam: float = GAE_LAMBDA, num_envs: int = 1,
+                  device: str = "cpu") -> None:
     global _worker_model, _worker_env_kwargs, _worker_opponent_agents, _worker_opponent_name
-    global _worker_adapter, _worker_gamma, _worker_lam
+    global _worker_adapter, _worker_gamma, _worker_lam, _worker_num_envs, _worker_device
     torch.set_num_threads(1)  # avoid N workers each spawning their own thread pool
     reseed_forked_worker(opponent_agents)
-    model.eval()
+    model.to(device).eval()
     _worker_model = model
+    _worker_device = device
     _worker_env_kwargs = env_kwargs
     _worker_opponent_agents = opponent_agents
     _worker_opponent_name = opponent_name
     _worker_adapter = adapter
     _worker_gamma = gamma
     _worker_lam = lam
+    _worker_num_envs = num_envs
 
 
 def _worker_collect(seeds: list[int]) -> list[tuple[int, list[dict], dict]]:
     """Per-episode (seed, transitions, summary) so the parent can reassemble
     results in seed order, independent of how seeds were split across
-    workers."""
-    env = CatanAECEnv(**_worker_env_kwargs)
-    out = []
-    for seed in seeds:
-        episode_data = collect_episode(env, _worker_model, "cpu", seed,
-                                        opponent_agents=_worker_opponent_agents, adapter=_worker_adapter)
-        transitions: list[dict] = []
-        for agent, trs in episode_data.items():
-            if trs:
-                transitions.extend(compute_gae(trs, gamma=_worker_gamma, lam=_worker_lam))
-        out.append((seed, transitions,
-                    _episode_summary(env, seed, _worker_opponent_agents, _worker_opponent_name)))
-    return out
+    workers or batched within one."""
+    return [_runner_output(r, _worker_opponent_name, _worker_gamma, _worker_lam)
+            for r in collect_episodes_batched(_worker_env_kwargs, _worker_model, _worker_device, seeds,
+                                              _worker_opponent_agents, _worker_adapter,
+                                              num_envs=_worker_num_envs)]
 
 
 def collect_rollout_parallel(env_kwargs: dict, model,
@@ -273,26 +343,43 @@ def collect_rollout_parallel(env_kwargs: dict, model,
                               opponent_agents: dict[int, object] | None = None,
                               opponent_name: str | None = None,
                               adapter: ModelAdapter = FLAT_ADAPTER,
-                              gamma: float = GAMMA, lam: float = GAE_LAMBDA) -> tuple[list[dict], list[dict]]:
+                              gamma: float = GAMMA, lam: float = GAE_LAMBDA,
+                              envs_per_worker: int = 1,
+                              inference_device: str = "cpu") -> tuple[list[dict], list[dict]]:
+    """Rollouts across `num_workers` processes, each running
+    `envs_per_worker` games concurrently with one batched forward pass per
+    round. CPU inference uses forked workers (model shared copy-on-write);
+    GPU inference (`inference_device="cuda"`) uses *spawned* workers, each
+    with its own CUDA context and a copy of the weights -- the fast path for
+    the GNN, whose batch-1 CPU forward is ~6 ms but ~0.14 ms/sample batched
+    on a GPU. With num_workers == 1 everything runs in this process (the
+    model must already be on `inference_device`). Output is identical in
+    every configuration (F-22)."""
     seeds = list(range(base_seed, base_seed + num_episodes))
+    if num_workers <= 1:
+        model.to(inference_device).eval()
+        episodes = [_runner_output(r, opponent_name, gamma, lam)
+                    for r in collect_episodes_batched(env_kwargs, model, inference_device, seeds,
+                                                      opponent_agents, adapter, num_envs=envs_per_worker)]
+        return _assemble(episodes)
     num_workers = max(1, min(num_workers, num_episodes))
     chunks = [seeds[i::num_workers] for i in range(num_workers)]
     chunks = [c for c in chunks if c]
 
-    ctx = mp.get_context("fork")
-    with ctx.Pool(processes=len(chunks), initializer=_init_worker,
-                  initargs=(model, env_kwargs, opponent_agents, opponent_name, adapter, gamma, lam)) as pool:
-        results = pool.map(_worker_collect, chunks)
-
-    # Seed order == the order sequential collect_rollout produces, so the
-    # PPO update sees identical data either way (audit F-22).
-    episodes = sorted((ep for chunk in results for ep in chunk), key=lambda ep: ep[0])
-    all_transitions: list[dict] = []
-    all_summaries: list[dict] = []
-    for _, transitions, summary in episodes:
-        all_transitions.extend(transitions)
-        all_summaries.append(summary)
-    return all_transitions, all_summaries
+    if inference_device == "cpu":
+        ctx, worker_model = mp.get_context("fork"), model
+    else:
+        # a CUDA context can't survive fork: spawn fresh processes and ship
+        # them a CPU copy of the weights (each moves it to the GPU)
+        ctx, worker_model = mp.get_context("spawn"), copy.deepcopy(model).to("cpu")
+    # concurrent.futures rather than multiprocessing.Pool: a worker that dies
+    # (e.g. failing to initialize) raises BrokenProcessPool instead of being
+    # silently respawned forever.
+    with ProcessPoolExecutor(max_workers=len(chunks), mp_context=ctx, initializer=_init_worker,
+                             initargs=(worker_model, env_kwargs, opponent_agents, opponent_name, adapter,
+                                       gamma, lam, envs_per_worker, inference_device)) as pool:
+        results = list(pool.map(_worker_collect, chunks))
+    return _assemble(ep for chunk in results for ep in chunk)
 
 
 def load_bc_anchor(path: str, device: str, max_samples: int | None = None,

@@ -31,12 +31,10 @@ not a redesign.
 """
 from __future__ import annotations
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
-from env.actions import Action
 from training.board_topology import (
     EDGE_TO_VERTEX, HEX_TO_VERTEX, NUM_EDGES, NUM_HEXES, NUM_VERTICES,
     VERTEX_TO_EDGE, VERTEX_TO_HEX, VERTEX_TO_VERTEX,
@@ -47,10 +45,9 @@ from training.graph_features import (
 )
 from env.state import NUM_PLAYERS
 from training.hier_model import (
-    ACTION_TYPES, ACTION_TYPE_INDEX, HEAD_NAMES, HEAD_SIZES, NEG_INF, NO_TRADE_COUNTS,
-    NO_TRADE_MASKS, NUM_ACTION_TYPES, SUBMASK_PAD, TRADE_TYPES, TYPE_TO_HEADS, TradeCountHead,
-    _pad, decode_trade, group_by_type, masked_sample, match_action, prepare_transition_batch,
-    stage1_mask, stage2_mask, trade_logprob_entropy,
+    HEAD_NAMES, HEAD_SIZES, NEG_INF, NUM_ACTION_TYPES, ActorSampling, TradeCountHead,
+    prepare_transition_batch,
+    trade_logprob_entropy,
 )
 
 
@@ -127,7 +124,7 @@ class GraphTopology(nn.Module):
         self.register_buffer("vertex_from_vertex_count", counts(VERTEX_TO_VERTEX[1], NUM_VERTICES))
 
 
-class GraphActorCritic(nn.Module):
+class GraphActorCritic(ActorSampling, nn.Module):
     def __init__(self, hidden: int = 128, gnn_layers: int = 3,
                  public_hand_features: bool = False):
         super().__init__()
@@ -272,62 +269,18 @@ class GraphActorCritic(nn.Module):
         features, _, _, _, _ = self.encode(obs_batch)
         return self.value_head(features).squeeze(-1)
 
-    def act(self, obs_batch: dict[str, torch.Tensor], legal_actions: list[Action],
-            deterministic: bool = False) -> tuple[Action, float, float, dict]:
-        device = next(iter(obs_batch.values())).device
+    def head_logits_batch(self, obs_batch: dict[str, torch.Tensor]):
+        """Every head's logits for the whole batch from one encoder pass
+        (pointer heads score each node embedding), moved to host NumPy once
+        -- see ActorSampling."""
         features, hex_emb, vertex_emb, edge_emb, opp_emb = self.encode(obs_batch)
         self_id = obs_batch["self_id"]
-        by_type = group_by_type(legal_actions)
-
-        type_mask = np.zeros(NUM_ACTION_TYPES, dtype=np.float32)
-        for t in by_type:
-            type_mask[ACTION_TYPE_INDEX[t]] = 1.0
-        type_logits = self.type_head(features).squeeze(0)
-        type_idx, logprob = masked_sample(type_logits, torch.as_tensor(type_mask, device=device),
-                                           deterministic)
-
-        chosen_type = ACTION_TYPES[type_idx]
-        actions_of_type = by_type[chosen_type]
-        stage1_head, stage2_head = TYPE_TO_HEADS[chosen_type]
-
-        idx1, idx2 = -1, -1
-        mask1_padded = np.zeros(SUBMASK_PAD, dtype=np.float32)
-        mask2_padded = np.zeros(SUBMASK_PAD, dtype=np.float32)
-
-        if stage1_head is not None:
-            mask1 = stage1_mask(chosen_type, actions_of_type)
-            logits1 = self._head_logits(stage1_head, features, hex_emb, vertex_emb, edge_emb,
-                                         opp_emb, self_id).squeeze(0)
-            idx1, lp1 = masked_sample(logits1, torch.as_tensor(mask1, device=device), deterministic)
-            logprob += lp1
-            mask1_padded = _pad(mask1)
-
-            if stage2_head is not None:
-                mask2 = stage2_mask(chosen_type, actions_of_type, idx1)
-                logits2 = self._head_logits(stage2_head, features, hex_emb, vertex_emb, edge_emb,
-                                             opp_emb, self_id).squeeze(0)
-                idx2, lp2 = masked_sample(logits2, torch.as_tensor(mask2, device=device), deterministic)
-                logprob += lp2
-                mask2_padded = _pad(mask2)
-
-        trade_counts, trade_masks = NO_TRADE_COUNTS, NO_TRADE_MASKS
-        if chosen_type in TRADE_TYPES:
-            result_action, lp_t, trade_counts, trade_masks = decode_trade(
-                self.trade_head, features, actions_of_type[0], idx1, deterministic)
-            logprob += lp_t
-        else:
-            result_action = match_action(chosen_type, actions_of_type,
-                                          idx1 if idx1 != -1 else None, idx2 if idx2 != -1 else None)
-        value = self.value_head(features).squeeze(0).squeeze(-1)
-
-        head_data = {
-            "type_mask": type_mask, "type_idx": type_idx,
-            "stage1_head": stage1_head, "stage2_head": stage2_head,
-            "sub_mask_1": mask1_padded, "sub_idx_1": idx1,
-            "sub_mask_2": mask2_padded, "sub_idx_2": idx2,
-            "trade_counts": trade_counts, "trade_masks": trade_masks,
-        }
-        return result_action, logprob, float(value.item()), head_data
+        logits = {"type": self.type_head(features)}
+        for name in HEAD_NAMES:
+            logits[name] = self._head_logits(name, features, hex_emb, vertex_emb, edge_emb, opp_emb, self_id)
+        values = self.value_head(features).squeeze(-1)
+        return (features.float().cpu().numpy(), {k: v.float().cpu().numpy() for k, v in logits.items()},
+                values.float().cpu().numpy())
 
     def evaluate_actions(self, obs_batch: dict[str, torch.Tensor], transitions):
         """See HierarchicalActorCritic.evaluate_actions -- `transitions` is

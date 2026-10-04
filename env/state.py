@@ -18,6 +18,10 @@ MAX_TRADE_CARDS_PER_SIDE = 3  # domestic trade bundles: 1-3 cards given, 1-3 car
 
 
 class DevCard(Enum):
+    # identity hash (C-level): members are singletons compared by identity, and the
+    # default Enum.__hash__ is a Python-level call that showed up as ~12% of rollout time
+    __hash__ = object.__hash__
+
     KNIGHT = "knight"
     ROAD_BUILDING = "road_building"
     YEAR_OF_PLENTY = "year_of_plenty"
@@ -42,6 +46,10 @@ BUILDING_COSTS = {
 
 
 class Phase(Enum):
+    # identity hash (C-level): members are singletons compared by identity, and the
+    # default Enum.__hash__ is a Python-level call that showed up as ~12% of rollout time
+    __hash__ = object.__hash__
+
     SETUP_SETTLEMENT = auto()
     SETUP_ROAD = auto()
     ROLL = auto()

@@ -1,0 +1,42 @@
+[
+ {
+  "model": "gnn256x4",
+  "workers": 4,
+  "envs_per_worker": 32,
+  "device": "cuda",
+  "episodes": 128,
+  "transitions": 152795,
+  "seconds": 42.78,
+  "transitions_per_s": 3571.3
+ },
+ {
+  "model": "gnn256x4",
+  "workers": 6,
+  "envs_per_worker": 24,
+  "device": "cuda",
+  "episodes": 144,
+  "transitions": 167904,
+  "seconds": 49.43,
+  "transitions_per_s": 3397.0
+ },
+ {
+  "model": "gnn128x3",
+  "workers": 4,
+  "envs_per_worker": 32,
+  "device": "cuda",
+  "episodes": 128,
+  "transitions": 149122,
+  "seconds": 29.07,
+  "transitions_per_s": 5129.0
+ },
+ {
+  "model": "hier256",
+  "workers": 6,
+  "envs_per_worker": 32,
+  "device": "cuda",
+  "episodes": 192,
+  "transitions": 218023,
+  "seconds": 20.86,
+  "transitions_per_s": 10454.0
+ }
+]
