@@ -1,0 +1,29 @@
+........................................................................ [ 59%]
+.................................................                        [100%]
+=============================== warnings summary ===============================
+tests/test_dagger.py::test_collect_dagger_parallel_matches_schema
+tests/test_dagger.py::test_collect_dagger_parallel_matches_schema
+tests/test_gnn_imitation.py::test_dagger_gnn_collection_and_aggregation
+tests/test_gnn_imitation.py::test_dagger_gnn_collection_and_aggregation
+tests/test_gnn_model.py::test_gnn_parallel_rollout_matches_sequential_shape
+tests/test_gnn_model.py::test_gnn_parallel_rollout_matches_sequential_shape
+tests/test_hier_model.py::test_parallel_rollout_matches_sequential_shape_and_is_valid
+tests/test_hier_model.py::test_parallel_rollout_matches_sequential_shape_and_is_valid
+tests/test_hier_model.py::test_parallel_rollout_matches_sequential_shape_and_is_valid
+  /usr/lib/python3.14/multiprocessing/popen_fork.py:70: DeprecationWarning: This process (pid=215811) is multi-threaded, use of fork() may lead to deadlocks in the child.
+    self.pid = os.fork()
+
+tests/test_pettingzoo_env.py::test_pettingzoo_api_compliance
+  /home/andres/claude/catan-marl/.venv/lib/python3.14/site-packages/pettingzoo/test/api_test.py:140: UserWarning: Observation is not a NumPy array
+    warnings.warn("Observation is not a NumPy array")
+
+tests/test_pettingzoo_env.py::test_pettingzoo_api_compliance
+  /home/andres/claude/catan-marl/.venv/lib/python3.14/site-packages/pettingzoo/test/api_test.py:242: UserWarning: Observation space for each agent probably should be gymnasium.spaces.box or gymnasium.spaces.discrete
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+121 passed, 11 warnings in 154.91s (0:02:34)
+
+real	2m36.082s
+user	2m56.281s
+sys	0m6.195s

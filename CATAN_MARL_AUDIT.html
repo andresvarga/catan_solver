@@ -1,0 +1,2130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catan MARL Audit</title>
+<style>
+:root{
+  --bg:#f6f7f9; --surface:#ffffff; --surface-2:#f1f3f6; --text:#1b1f24; --muted:#5b6470; --border:#dfe3e8;
+  --accent:#2f5bd3; --accent-soft:#e8eefc; --code-bg:#f3f4f7;
+  --ok:#1f8a4c; --bad:#c23a3a;
+  --a:#1f8a4c; --a-soft:#e4f4ea; --b:#3b7a2a; --b-soft:#eef5e4; --c:#a8690b; --c-soft:#fbf1df; --d:#c24b1f; --d-soft:#fbe8e0; --f:#b42330; --f-soft:#fbe3e5;
+  --p0:#8e1b2a; --p1:#c23a3a; --p2:#c27a12; --p3:#5b6470;
+  --pill-conf:#c23a3a; --pill-conf-bg:#fbe3e5; --pill-likely:#a8690b; --pill-likely-bg:#fbf1df;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1216; --surface:#171b21; --surface-2:#1e232b; --text:#e6e9ee; --muted:#9aa4b2; --border:#2a313b;
+    --accent:#86a6ff; --accent-soft:#1f2a44; --code-bg:#1e232b; --ok:#58c98a; --bad:#ff7b7b;
+    --a:#58c98a; --a-soft:#16301f; --b:#9ad07a; --b-soft:#1f2c17; --c:#f0b24f; --c-soft:#33270f; --d:#ff9a6b; --d-soft:#371d12; --f:#ff7b86; --f-soft:#3a171b;
+    --p0:#ff6b7d; --p1:#ff7b7b; --p2:#f0b24f; --p3:#9aa4b2;
+    --pill-conf:#ff8f8f; --pill-conf-bg:#3a171b; --pill-likely:#f0b24f; --pill-likely-bg:#33270f;
+  }
+}
+:root[data-theme="dark"]{
+    --bg:#0f1216; --surface:#171b21; --surface-2:#1e232b; --text:#e6e9ee; --muted:#9aa4b2; --border:#2a313b;
+    --accent:#86a6ff; --accent-soft:#1f2a44; --code-bg:#1e232b; --ok:#58c98a; --bad:#ff7b7b;
+    --a:#58c98a; --a-soft:#16301f; --b:#9ad07a; --b-soft:#1f2c17; --c:#f0b24f; --c-soft:#33270f; --d:#ff9a6b; --d-soft:#371d12; --f:#ff7b86; --f-soft:#3a171b;
+    --p0:#ff6b7d; --p1:#ff7b7b; --p2:#f0b24f; --p3:#9aa4b2;
+    --pill-conf:#ff8f8f; --pill-conf-bg:#3a171b; --pill-likely:#f0b24f; --pill-likely-bg:#33270f;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth; scroll-padding-top:16px}
+body{margin:0; background:var(--bg); color:var(--text);
+  font:15.5px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--accent); text-decoration:none} a:hover{text-decoration:underline}
+.layout{display:grid; grid-template-columns:260px minmax(0,1fr); max-width:1400px; margin:0 auto; gap:28px; padding:24px}
+nav.toc{position:sticky; top:24px; align-self:start; max-height:calc(100vh - 48px); overflow:auto;
+  background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 10px}
+nav.toc summary{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 8px 8px; cursor:pointer}
+nav.toc ol{list-style:none; margin:0; padding:0}
+nav.toc a{display:block; padding:5px 8px; border-radius:6px; color:var(--text); font-size:13.5px; line-height:1.35}
+nav.toc a:hover{background:var(--surface-2); text-decoration:none}
+nav.toc a.active{background:var(--accent-soft); color:var(--accent); font-weight:600}
+main{min-width:0}
+header.hero{background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:28px 30px; margin-bottom:22px}
+header.hero h1{margin:0 0 6px; font-size:30px; letter-spacing:-.01em}
+header.hero .meta{color:var(--muted); font-size:14px}
+header.hero .meta p{margin:6px 0}
+.counts{display:flex; gap:10px; margin-top:18px; flex-wrap:wrap}
+.count{display:flex; align-items:baseline; gap:8px; padding:8px 14px; border-radius:10px; background:var(--surface-2); border-left:4px solid var(--p3)}
+.count b{font-size:22px} .count span{color:var(--muted); font-size:13px; font-weight:600}
+.count.sev-p0{border-color:var(--p0)} .count.sev-p1{border-color:var(--p1)} .count.sev-p2{border-color:var(--p2)} .count.sev-p3{border-color:var(--p3)}
+.theme-btn{float:right; background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:6px 10px; cursor:pointer; font:inherit; font-size:13px}
+section.card{background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:6px 30px 22px; margin-bottom:22px}
+h2{font-size:22px; margin:22px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border)}
+h3{font-size:17.5px; margin:26px 0 10px}
+h3.finding{padding:12px 14px; background:var(--surface-2); border-radius:10px; border-left:5px solid var(--p3); line-height:1.4}
+h3.sev-p1{border-left-color:var(--p1)} h3.sev-p2{border-left-color:var(--p2)} h3.sev-p0{border-left-color:var(--p0)}
+.sev-badge{display:inline-block; font-size:12px; font-weight:700; color:#fff; background:var(--p1); padding:2px 8px; border-radius:6px; margin-right:6px; vertical-align:2px}
+h3.sev-p2 .sev-badge{background:var(--p2)} h3.sev-p0 .sev-badge{background:var(--p0)}
+p,li{max-width:80ch}
+ul,ol{padding-left:22px} li{margin:4px 0}
+code{font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--code-bg); padding:1px 5px; border-radius:5px; overflow-wrap:anywhere}
+pre{background:var(--code-bg); border:1px solid var(--border); border-radius:10px; padding:14px 16px; overflow:auto}
+pre code{background:none; padding:0; font-size:12.5px; overflow-wrap:normal}
+.table-wrap{overflow-x:auto; margin:12px 0 16px; border:1px solid var(--border); border-radius:10px}
+table{border-collapse:collapse; width:100%; font-size:14px}
+th,td{padding:8px 11px; text-align:left; vertical-align:top; border-bottom:1px solid var(--border)}
+th{background:var(--surface-2); font-weight:600; position:sticky; top:0}
+tbody tr:nth-child(even){background:color-mix(in srgb, var(--surface-2) 45%, transparent)}
+tbody tr:last-child td{border-bottom:none}
+tr:target{outline:2px solid var(--accent); outline-offset:-2px}
+h3:target{outline:2px solid var(--accent)}
+.pill{display:inline-block; font-size:11.5px; font-weight:700; letter-spacing:.03em; padding:1px 7px; border-radius:999px; white-space:nowrap}
+.st-confirmed{color:var(--pill-conf); background:var(--pill-conf-bg)}
+.st-likely,.st-possible{color:var(--pill-likely); background:var(--pill-likely-bg)}
+.st-not{color:var(--muted); background:var(--surface-2)}
+.ok{color:var(--ok); font-weight:700} .bad{color:var(--bad); font-weight:700}
+a.fref{font-weight:600; white-space:nowrap}
+.grades{display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px; margin:14px 0 18px}
+.grade{border-radius:12px; padding:14px; border:1px solid var(--border); background:var(--surface-2); display:grid; grid-template-columns:auto 1fr; gap:2px 12px; align-items:center}
+.grade-letter{grid-row:span 2; font-size:30px; font-weight:800; width:52px; height:52px; display:grid; place-items:center; border-radius:10px}
+.grade-area{font-weight:700; font-size:14.5px; line-height:1.25}
+.grade-note{grid-column:1 / -1; color:var(--muted); font-size:13px; line-height:1.4; margin-top:8px}
+.g-a .grade-letter{color:var(--a); background:var(--a-soft)} .g-b .grade-letter{color:var(--b); background:var(--b-soft)}
+.g-c .grade-letter{color:var(--c); background:var(--c-soft)} .g-d .grade-letter{color:var(--d); background:var(--d-soft)}
+.g-f .grade-letter{color:var(--f); background:var(--f-soft)}
+.totop{position:fixed; right:18px; bottom:18px; background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:8px 14px; font-size:13px; box-shadow:0 2px 8px rgba(0,0,0,.08)}
+@media (max-width: 960px){
+  .layout{grid-template-columns:minmax(0,1fr); padding:16px; gap:16px}
+  nav.toc summary{margin:0 8px}
+  nav.toc details[open] summary{margin-bottom:8px}
+  nav.toc{position:static; max-height:none}
+  nav.toc ol{columns:2; column-gap:12px}
+  section.card{padding:4px 16px 16px} header.hero{padding:20px 16px}
+  header.hero h1{font-size:24px}
+}
+@media (max-width: 560px){ nav.toc ol{columns:1} }
+@media print{
+  nav.toc,.totop,.theme-btn{display:none} .layout{display:block; padding:0}
+  section.card,header.hero{border:none; break-inside:auto} body{background:#fff}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" aria-label="Contents"><details id="tocd" open><summary>Contents</summary><ol><li><a href="#executive-summary">Executive Summary</a></li><li><a href="#critical-findings-p0">Critical Findings</a></li><li><a href="#high-priority-findings-p1">High-Priority Findings</a></li><li><a href="#medium-findings-p2">Medium Findings</a></li><li><a href="#low-priority-findings-p3">Low-Priority Findings</a></li><li><a href="#architecture-overview">Architecture Overview</a></li><li><a href="#catan-rules-coverage">Catan Rules Coverage</a></li><li><a href="#observation-space-audit">Observation-Space Audit</a></li><li><a href="#action-space-audit">Action-Space Audit</a></li><li><a href="#reward-audit">Reward Audit</a></li><li><a href="#marl-algorithm-audit">MARL Algorithm Audit</a></li><li><a href="#self-play-audit">Self-Play Audit</a></li><li><a href="#controlled-mini-training-experiment-checkpoint-ladder-phases-31-40">Controlled Mini Training Experiment &amp; Checkpoint Ladder</a></li><li><a href="#evaluation-audit">Evaluation Audit</a></li><li><a href="#performance-results">Performance Results</a></li><li><a href="#testing-results">Testing Results</a></li><li><a href="#reproducibility-results">Reproducibility Results</a></li><li><a href="#exploitability-reward-hacking-risks">Exploitability / Reward-Hacking Risks</a></li><li><a href="#known-simplifications-from-standard-catan">Known Simplifications From Standard Catan</a></li><li><a href="#recommended-fixes">Recommended Fixes</a></li><li><a href="#recommended-new-tests">Recommended New Tests</a></li><li><a href="#recommended-training-improvements">Recommended Training Improvements</a></li><li><a href="#recommended-evaluation-protocol">Recommended Evaluation Protocol</a></li><li><a href="#roadmap">Roadmap</a></li><li><a href="#answers-to-the-25-questions">Answers to the 25 Questions</a></li></ol></details></nav>
+<main>
+<header class="hero">
+<button class="theme-btn" id="theme" type="button">Dark mode</button>
+<h1>Catan MARL Audit</h1>
+<div class="meta"><p>Audit date: 2026-10-04 · Repository: <code>catan-marl/</code> · Branch <code>master</code> @ <code>6e6949a</code> (clean except two pre-existing,
+uncommitted user edits in <code>scripts/collect_dagger_demos.py</code>, <code>training/dagger.py</code>, left untouched).
+Environment: Python 3.14.4, torch 2.12.1+cu126, gymnasium 1.3.0, pettingzoo 1.26.1, numpy 2.5.0,
+Linux 7.0.0-34, 16 cores, RTX 3060 Laptop (6 GB). Full baseline: <code>audit/results/baseline.md</code>.</p>
+<p>All audit code lives in <code>audit/</code> (tests in <code>audit/tests/</code>, tools in <code>audit/tools/</code>, raw outputs in
+<code>audit/results/</code>). <strong>No production file was modified.</strong> Rule questions were resolved against the official
+2020 CATAN base rules &amp; almanac downloaded from catan.com (<code>audit/results/catan_rules_2020.pdf</code>/<code>.txt</code>).
+Every confirmed bug has a strict-xfail test that reproduces it and will flip when it is fixed.</p>
+<p>Labels: <strong>CONFIRMED</strong> (reproduced with a test or recorded seed), <strong>LIKELY</strong>, <strong>POSSIBLE</strong>, <strong>NOT REPRODUCED</strong>.</p>
+<hr /></div>
+<div class="counts"><div class="count sev-p0"><b>0</b><span>P0</span></div><div class="count sev-p1"><b>8</b><span>P1</span></div><div class="count sev-p2"><b>14</b><span>P2</span></div><div class="count sev-p3"><b>7</b><span>P3</span></div></div>
+</header>
+<section class="card"><h2 id="executive-summary">Executive Summary</h2>
+<p><strong>Overall:</strong> the engine is much better than most hobby Catan simulators. Information hiding is clean, action
+masking is airtight, and Longest Road is correct (checked against an independent oracle on ~52,000 networks).
+I found no P0 issue: nothing lets the agent see hidden information, take an illegal action through the policy,
+or farm reward in a way that would invalidate past results.</p>
+<p>It is still <strong>not "rules-correct standard Catan"</strong>, as the README claims. The confirmed deviations are:</p>
+<ul>
+<li>resource non-conservation and a bank that can go negative;</li>
+<li>wins awarded off-turn;</li>
+<li>no pre-roll development cards;</li>
+<li>a turn lock after Road Building;</li>
+<li>1:1-only player trading with a 2-proposal-per-turn cap;</li>
+<li>6/8 tokens adjacent on about 87% of boards.</li>
+</ul>
+<p>The ML-side problems that matter most are:</p>
+<ul>
+<li><strong>Evaluation and selection are biased.</strong> In-loop evals always seat the model at seat 0, which is measurably
+  the best seat, while the code and memory describe them as seat-rotated.</li>
+<li><strong>Credit assignment is very weak.</strong> γ=0.99 per own decision over about 226 decisions per player per game
+  passes only ~10% of the terminal reward back to the opening placements.</li>
+<li><strong>The reward does not target winning.</strong> It is rank- and VP-based, and truncation pays a VP leader the full
+  win reward. With the CLI's own defaults, 90–98% of games are truncated.</li>
+<li><strong>Counter-offers are invisible to the policy</strong> that must accept or reject them.</li>
+<li><strong>The claimed champion cannot be verified.</strong> Its weights and training pools no longer exist on disk.</li>
+</ul>
+<div class="grades"><div class="grade g-c"><div class="grade-letter">C+</div><div class="grade-area">Catan Rules Correctness</div><div class="grade-note">Core mechanics right; 10 confirmed deviations, 3 affect strategy (pre-roll dev cards, trading model, Road Building lock)</div></div><div class="grade g-b"><div class="grade-letter">B+</div><div class="grade-area">Environment/API Correctness</div><div class="grade-note">Official <code>api_test</code> + <code>seed_test</code> pass; reward bookkeeping correct; <code>step()</code> has no legality guard</div></div><div class="grade g-a"><div class="grade-letter">A−</div><div class="grade-area">Information Integrity</div><div class="grade-note">Counterfactual leakage tests pass under every encoder; minus: counter-offer omitted (under-information, not leakage); baseline heuristics read hidden state</div></div><div class="grade g-b"><div class="grade-letter">B</div><div class="grade-area">Action Space</div><div class="grade-note">Pointer heads always produce legal actions; 1:1-trade-only + discard cap + 2-proposal cap make some legal Catan actions unrepresentable</div></div><div class="grade g-c"><div class="grade-letter">C</div><div class="grade-area">Reward Design</div><div class="grade-note">Rank reward ≠ win objective; truncation pays win reward; γ horizon far too short for Catan</div></div><div class="grade g-b"><div class="grade-letter">B−</div><div class="grade-area">MARL Architecture</div><div class="grade-note">PPO math verified (log-prob/value recomputation exact); no centralized critic, no memory; GNN encoder is sound</div></div><div class="grade g-c"><div class="grade-letter">C−</div><div class="grade-area">Self-Play</div><div class="grade-note">Champion line is BC + PPO vs a <em>fixed</em> heuristic opponent; league promotion test is practically unreachable</div></div><div class="grade g-c"><div class="grade-letter">C</div><div class="grade-area">Evaluation</div><div class="grade-note">Good habits in memory (fresh seeds, n≥600), but in-repo evals are seat-0-only, no CIs, random-opponent tier is uninformative</div></div><div class="grade g-d"><div class="grade-letter">D+</div><div class="grade-area">Reproducibility</div><div class="grade-note">Sequential training bit-reproducible; parallel rollouts (all real runs) are not; champion artifacts deleted</div></div><div class="grade g-b"><div class="grade-letter">B−</div><div class="grade-area">Testing</div><div class="grade-note">121 tests, mostly behavioural; no conservation/off-turn-win/counter-visibility tests; one test encodes an incomplete rule</div></div><div class="grade g-c"><div class="grade-letter">C+</div><div class="grade-area">Performance</div><div class="grade-note">Engine fast (~38k steps/s/core); batch-1 policy inference dominates (GNN rollout ~30× slower than flat model)</div></div><div class="grade g-b"><div class="grade-letter">B</div><div class="grade-area">Maintainability</div><div class="grade-note">Clear modules, unusually good docstrings; functional engine with no guards; README stale (says 69 tests)</div></div></div>
+
+
+</section><section class="card"><h2 id="critical-findings-p0">Critical Findings (P0)</h2>
+<p>None confirmed. No evidence of hidden-information leakage, illegal actions reachable by the policy, evaluation
+contamination by gradient updates, or reward farming that would invalidate existing results. Several P1 items
+below <strong>would</strong> be P0 if the CLI defaults were used for a headline run (see <a class="fref" href="#f-06">F-06</a>).</p>
+
+</section><section class="card"><h2 id="high-priority-findings-p1">High-Priority Findings (P1)</h2>
+<h3 class="finding sev-p1" id="f-14"><span class="sev-badge">P1</span> F-14 — In-loop evaluation is seat-0 only; seat 0 is the strongest seat — <span class="pill st-confirmed">CONFIRMED</span></h3>
+<ul>
+<li><strong>Evidence:</strong> <code>training/train_hier.py:_play_eval_game</code> (lines 74-95): <code>agents = {0: HierarchicalLearnedAgent(...)}</code>,
+  docstring "Trainee (deterministic, seat 0)". <code>training/rl_finetune.py:fixed_seed_eval</code> → <code>evaluate_policy</code>
+  inherits this, while the module docstring (lines 25-27) says "the eval protocol rotates the model's seat by
+  seed". <code>best_eval.pt</code> is selected on this number (lines 196-206).</li>
+<li><strong>Reproduction:</strong> <code>audit/tools/tournament.py</code> heuristic×4, 1000 board seeds × 4 seats (4000 games, base 20.1M):
+  seat 0 wins <strong>28.3%</strong> of all games, seats 1/2/3 = 24.5/22.9/24.3% (χ²(3)=25.7, p≈1e-5). The search agent vs
+  3 heuristics: 64.4% from seat 0 vs 54.8–57.2% from seats 1–3 (<code>t_search_vs_heuristic.json</code>).</li>
+<li><strong>Impact:</strong> In-loop win rates are inflated relative to rotated evaluation by roughly +3–7pp, depending on
+  the agent. Selecting <code>best_eval.pt</code> from 40 noisy seat-0 looks compounds the winner's curse already noted in
+  memory. In-loop numbers cannot be compared with seat-rotated confirmatories.</li>
+<li><strong>Fix:</strong> rotate <code>trainee_seat = seed % 4</code> in <code>_play_eval_game</code> (as <code>league_train._play_vs_member_game</code>
+  already does), or play every seed from all 4 seats (as <code>audit/tools/tournament.py</code> does).</li>
+<li><strong>Regression test:</strong> assert that <code>evaluate_policy</code> reports per-seat counts with each seat at n/4.</li>
+</ul>
+<h3 class="finding sev-p1" id="f-15"><span class="sev-badge">P1</span> F-15 — Discounting destroys long-horizon credit — <span class="pill st-confirmed">CONFIRMED</span> (measurement)</h3>
+<ul>
+<li><strong>Evidence:</strong> <code>training/ppo.py</code> <code>GAMMA=0.99</code>, <code>GAE_LAMBDA=0.95</code>, applied per <em>own</em> transition
+  (<code>hier_ppo.collect_episode</code> records every decision, including forced ones).</li>
+<li><strong>Reproduction:</strong> <code>audit/tests/test_policy_pipeline_audit.py::test_effective_discount_of_terminal_reward</code>
+  measured a median of 230 non-forced decisions per player per heuristic game. Self-play rollouts with the
+  audit checkpoint averaged 226 transitions per agent per episode, 19.9% of them forced single-option moves.
+  0.99^226 ≈ <strong>0.10</strong>. GAE(λ=0.95) shrinks the signal further: (0.99·0.95)^k reaches about 1e-5 after 226 steps.</li>
+<li><strong>Impact:</strong> The opening settlements, the most consequential decisions in Catan, receive about one tenth of
+  the terminal signal, and in effect nothing through GAE. The policy is pushed toward short-term VP and
+  production, so value estimates for early states are dominated by bias. This is the most plausible
+  structural cause of the RL plateau recorded in memory, where three RL legs ended null.</li>
+<li><strong>Fix:</strong> γ≥0.999 (or γ=1 with a terminal-only reward), λ≈0.98–1.0; drop forced single-action transitions
+  from the trajectory (they carry no policy gradient but still consume discount); or discount per <em>turn</em>
+  instead of per decision.</li>
+<li><strong>Regression test:</strong> assert that γ^(median own-decisions) ≥ 0.5 in the training config.</li>
+</ul>
+<h3 class="finding sev-p1" id="f-06"><span class="sev-badge">P1</span> F-06 — Truncation pays the full win reward; default step caps truncate most games — <span class="pill st-confirmed">CONFIRMED</span></h3>
+<ul>
+<li><strong>Evidence:</strong> <code>env/pettingzoo_env.py:194-196</code> calls <code>_assign_terminal_rewards()</code> on truncation ("rank on
+  current standing"). <code>rank_reward={0:1.0,…}</code> gives the VP leader exactly the reward of a real win.
+  <code>compute_gae</code> treats truncation as terminal with no bootstrap (<code>training/ppo.py:25-33</code>). Defaults:
+  <code>train_hier --max-episode-steps 600</code>, <code>rl_finetune --max-episode-steps 800</code>.</li>
+<li><strong>Reproduction:</strong> <code>test_env_api_audit.py::test_truncation_pays_win_reward_to_vp_leader</code>: a leader with &lt;10 VP
+  receives +1.0. Heuristic games last a median of <strong>1,109 steps</strong> (p10 806, p90 1452; 400 games). <strong>90.5% exceed
+  800 steps, 98% exceed 600, 0% exceed 2500.</strong></li>
+<li><strong>Impact:</strong> With default flags, training optimises "lead on VP at step 600/800". That is a different game
+  from Catan: it favours early settlements over cities, development cards, and Largest Army. Memory says the
+  champion legs used 2500, which is safe. The project's documented quick-start (<code>README</code> →
+  <code>train_hier --iterations 150 …</code>) uses the 600 default.</li>
+<li><strong>Fix:</strong> raise defaults to ≥4000 (or no cap); on truncation give 0 reward and bootstrap V(s_T), the
+  standard treatment; or a small draw penalty. Never pay +1 without a win.</li>
+<li><strong>Regression test:</strong> assert <code>rewards[leader] &lt; 1.0</code> when truncated without a winner.</li>
+</ul>
+<h3 class="finding sev-p1" id="f-04"><span class="sev-badge">P1</span> F-04 — Counter-offer terms are invisible to the player who must accept/reject them — <span class="pill st-confirmed">CONFIRMED</span></h3>
+<ul>
+<li><strong>Evidence:</strong> <code>env/state.py:134</code> <code>trade_counter_context</code>. Neither <code>env/pettingzoo_env.build_observation</code>
+  (lines 360-369) nor <code>training/graph_features.build_graph_observation</code> (lines 166-173) reads it; both encode
+  only <code>pending_trade</code>. <code>engine.acting_player</code> hands the decision to the proposer
+  (<code>engine.py:351-355</code>), and ACCEPT executes the counter's terms (<code>engine.py:757-767</code>).</li>
+<li><strong>Reproduction:</strong> <code>test_obs_leakage.py::test_counter_offer_terms_visible_to_proposer</code> (xfail). Two counters
+  with different terms produce byte-identical observations for the proposer.</li>
+<li><strong>Impact:</strong> A learned proposer accepts or rejects counters blind. Heuristic opponents read the counter
+  directly from <code>state</code> (<code>agents/heuristic.py:369-374</code>), so learned agents are systematically disadvantaged.
+  In self-play, counter-trading becomes noise rather than a skill.</li>
+<li><strong>Fix:</strong> add <code>counter_give</code>, <code>counter_want</code>, and the relative seat of <code>counter_proposer</code> to both encoders.</li>
+<li><strong>Regression test:</strong> the xfail above, flipped to a pass.</li>
+</ul>
+<h3 class="finding sev-p1" id="f-07"><span class="sev-badge">P1</span> F-07 — Development cards cannot be played before rolling — <span class="pill st-confirmed">CONFIRMED</span> (documented simplification)</h3>
+<ul>
+<li><strong>Evidence:</strong> <code>engine.legal_actions</code> returns <code>[ROLL_DICE]</code> only in <code>Phase.ROLL</code> (line 410-411). Official rules:
+  "You may play a development card at any time, even before you roll the dice."</li>
+<li><strong>Reproduction:</strong> <code>test_rules_audit.py::test_knight_playable_before_roll</code> (xfail).</li>
+<li><strong>Impact:</strong> The common opening move of knighting the robber off your own hex before rolling is impossible,
+  which removes real strategy and changes Largest Army timing.</li>
+<li><strong>Fix:</strong> in <code>Phase.ROLL</code>, add the dev-card plays alongside ROLL_DICE. A knight played pre-roll moves the
+  robber and returns to ROLL. A pre-roll Road Building or Year of Plenty needs ROLL-phase handling.</li>
+</ul>
+<h3 class="finding sev-p1" id="f-20"><span class="sev-badge">P1</span> F-20 — Player trading is heavily simplified — <span class="pill st-confirmed">CONFIRMED</span> (documented)</h3>
+<ul>
+<li><strong>Evidence:</strong> <code>engine.legal_actions</code> enumerates only 1-for-1 proposals to <em>all</em> opponents (lines 490-498).
+  Counters are 1-for-1 too (lines 442-448). <code>MAX_TRADE_PROPOSALS_PER_TURN = 2</code> (<code>state.py:16</code>). The policy
+  heads mirror this (<code>hier_model.RESOURCE_PAIR_TYPES</code>).</li>
+<li><strong>Impact:</strong> Multi-card trades (2:1 asks, 1-for-2 offers), targeted offers, and open negotiation cannot be
+  represented. Domestic trade is the central social mechanic of Catan, and the learned game is "Catan with
+  vestigial trading". Results must not be described as standard Catan.</li>
+<li><strong>Fix (research-level):</strong> factorised give/want multisets (per-resource count heads), target-player selection,
+  and an explicit budget (e.g. ≤3 proposals) declared as the variant.</li>
+</ul>
+<h3 class="finding sev-p1" id="f-18"><span class="sev-badge">P1</span> F-18 — Claimed champion and training pools no longer exist — <span class="pill st-confirmed">CONFIRMED</span></h3>
+<ul>
+<li><strong>Evidence:</strong> memory records the champion at <code>~/.claude/jobs/aa3968d4/tmp/imitation_gnn/big/rl_long2/best_eval.pt</code>
+  plus several pools and anchors. <code>find /home/andres -name '*.pt'</code> finds no Catan checkpoints, and the
+  <code>.gitignore</code>d <code>checkpoints_*</code> directories are absent.</li>
+<li><strong>Impact:</strong> The headline result (57.2% vs 3 heuristics) cannot be re-verified, re-evaluated per seat, or
+  used as an init. The whole BC → DAgger → RL lineage would have to be regenerated.</li>
+<li><strong>Fix:</strong> keep experiment outputs under the repo (git-ignored) or another durable path, with a manifest
+  (args, git SHA, seeds, eval JSON) per checkpoint.</li>
+</ul>
+<h3 class="finding sev-p1" id="f-03"><span class="sev-badge">P1</span> F-03 — A player can win on another player's turn — <span class="pill st-confirmed">CONFIRMED</span></h3>
+<ul>
+<li><strong>Evidence:</strong> <code>engine.check_win</code> (lines 298-303) scans every player in id order after any VP-changing step.
+  Official rules: "You can only win during your turn. If … you have 10 victory points during another player's
+  turn, you must wait until your next turn."</li>
+<li><strong>Reproduction:</strong> <code>test_rules_audit.py::test_cannot_win_on_another_players_turn</code> (xfail) is a deterministic
+  construction. Player 0's settlement breaks player 1's road, Longest Road passes to player 2 (with 8 hidden
+  VP), and player 2 is declared winner during player 0's turn. Fuzzing found 15/10,000 random games
+  (<code>off_turn_win_seeds</code> in <code>fuzz_random_10000_rel.json</code>, e.g. seed 11000205) and 4/2,000 heuristic games
+  (e.g. seed 12000927).</li>
+<li><strong>Impact:</strong> Rare (~0.2%), but it is a wrong victory condition and gives a terminal reward to the wrong
+  player. Rated P1 rather than P0 only because of its frequency.</li>
+<li><strong>Fix:</strong> <code>check_win</code> should consider only <code>state.current_player</code>, and must also run at the start of each
+  player's turn (on ROLL) so a pending off-turn 10 VP is claimed then.</li>
+</ul>
+
+</section><section class="card"><h2 id="medium-findings-p2">Medium Findings (P2)</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Finding</th>
+<th>Status</th>
+<th>Evidence / reproduction</th>
+<th>Impact</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr id="f-01">
+<td><a class="fref" href="#f-01">F-01</a></td>
+<td>Setup starting resources created from nothing (bank not debited)</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>engine.py:592-600</code> (no <code>state.bank[r] -= 1</code>); <code>test_setup_grant_debits_bank</code>; fuzz: conservation broken in 89/100 games from step ~10; bank reaches 24/19</td>
+<td>Up to 12 extra cards in circulation; bank-shortage rule (<a class="fref" href="#f-11">F-11</a>) almost never fires; public card-count totals wrong</td>
+<td>debit bank in setup grant</td>
+</tr>
+<tr id="f-02">
+<td><a class="fref" href="#f-02">F-02</a></td>
+<td>Maritime trade ignores bank stock → bank negative, card minted</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>engine.py:481-488,732-738</code>; <code>test_maritime_trade_requires_bank_stock</code>; 65/10,000 random games, 1/2,000 heuristic (seed 12001242 step 906)</td>
+<td>Duplication path (rare); invalid state</td>
+<td>require <code>bank[receive] &gt;= 1</code></td>
+</tr>
+<tr id="f-05">
+<td><a class="fref" href="#f-05">F-05</a></td>
+<td><code>engine.step()</code> performs no legality validation</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>engine.py:572-823</code>; <code>test_engine_step_rejects_illegal_action</code> (BUILD_CITY with no cards → negative hand, VP +1)</td>
+<td>Not reachable via env/policy (index-into-legal-list) but every agent/eval/search path calls the engine directly; a buggy agent silently corrupts state</td>
+<td><code>step(..., validate=True)</code> default checking <code>action in legal_actions</code> (or a cheaper per-type predicate)</td>
+</tr>
+<tr id="f-08">
+<td><a class="fref" href="#f-08">F-08</a></td>
+<td>Road Building locks the turn when &lt;2 roads placeable</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>engine.py:460-465</code> (<code>free_roads_remaining&gt;0</code> hides everything else); <code>test_road_building_does_not_lock_turn</code></td>
+<td>Can't build/trade after RB with 1 piece left or 1 legal edge; also cannot decline 2nd road except by END_TURN</td>
+<td>clear <code>free_roads_remaining</code> when no legal free road; allow skipping</td>
+</tr>
+<tr id="f-10">
+<td><a class="fref" href="#f-10">F-10</a></td>
+<td>6/8 tokens adjacent on ~87% of boards</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>board.generate_board</code> shuffles tokens unconstrained; 868/1000 boards; <code>test_board_red_numbers_not_adjacent</code></td>
+<td>Training distribution ≠ official variable set-up; red-number clusters inflate robber/expansion value</td>
+<td>reject/resample until no adjacent 6/8</td>
+</tr>
+<tr id="f-13">
+<td><a class="fref" href="#f-13">F-13</a></td>
+<td>ACCEPT_TRADE legal for a responder who can't pay; CONFIRM then voids silently</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>engine.py:437-439,794-803</code>; <code>test_accept_requires_ability_to_pay</code>, <code>test_griefing_accept_cannot_burn_proposal_slots</code></td>
+<td>Griefing vector in self-play (burn the proposer's 2 proposals); noise in trade learning</td>
+<td>only offer ACCEPT if responder holds <code>want</code></td>
+</tr>
+<tr id="f-16">
+<td><a class="fref" href="#f-16">F-16</a></td>
+<td>Reward optimises rank/VP, not wins</td>
+<td><span class="pill st-confirmed">CONFIRMED</span> (design)</td>
+<td>rank reward {1,0,−0.5,−1} + VP shaping (<code>pettingzoo_env.py:205-243</code>); <code>train_hier --vp-shaping-weight 0.05</code> default</td>
+<td>2nd vs 4th place differs by 1.0 — agent pays win probability for placement; win rate is the reported metric</td>
+<td>terminal win/loss (+1/−1/3 per loser) for strength runs; anneal shaping to 0</td>
+</tr>
+<tr id="f-17">
+<td><a class="fref" href="#f-17">F-17</a></td>
+<td>League promotion test practically unreachable</td>
+<td><span class="pill st-confirmed">CONFIRMED</span> (code)</td>
+<td><code>league.promotion_test</code> requires ≥55% wins and binomial p&lt;0.05 vs p0=<strong>0.5</strong> in a 1-vs-3 game where parity is 25%</td>
+<td>Main never changes ⇒ PFSP/history machinery idles; README's 200-iter run had no promotion</td>
+<td>test vs p0=0.25 (or a head-to-head 2-seat format)</td>
+</tr>
+<tr id="f-19">
+<td><a class="fref" href="#f-19">F-19</a></td>
+<td>"vs random" evaluation is uninformative</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td>Untrained hier model 10.5% [8.8,12.5] vs 3 random; after <strong>2</strong> PPO iterations (96 self-play games) 80–90%; heuristic 100% (1000/1000)</td>
+<td>Win rate vs random saturates almost immediately; can't rank policies</td>
+<td>drop as a strength tier; keep as smoke test</td>
+</tr>
+<tr id="f-22">
+<td><a class="fref" href="#f-22">F-22</a></td>
+<td>Parallel rollouts not reproducible</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>hier_ppo.reseed_forked_worker</code> salts with <code>os.getpid()</code>; <code>audit/tools/repro_check.sh</code>: sequential same-seed runs bit-identical, <code>--num-workers 4</code> same-seed runs differ in metrics and weights</td>
+<td>Every real training run is unrepeatable</td>
+<td>salt with worker index + iteration + base seed</td>
+</tr>
+<tr id="f-24">
+<td><a class="fref" href="#f-24">F-24</a></td>
+<td>Dangerous CLI defaults</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>train_hier</code>: <code>--randomize-board</code> default False (one fixed board for every game), <code>--max-episode-steps 600</code> (98% truncation, <a class="fref" href="#f-06">F-06</a>), <code>--num-workers 1</code></td>
+<td>README's quick-start trains on a single board where almost every game is truncated</td>
+<td>defaults: random board, ≥4000 steps</td>
+</tr>
+<tr id="f-25">
+<td><a class="fref" href="#f-25">F-25</a></td>
+<td>GNN rollout throughput ~20× below flat model; GNN unusable on CPU for updates</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td>see Performance; memory records an 18 h CPU PPO update</td>
+<td>Limits GNN RL to ~10⁶ steps/h</td>
+<td>batched inference across envs (vectorised workers + one GPU inference server)</td>
+</tr>
+<tr id="f-12">
+<td><a class="fref" href="#f-12">F-12</a></td>
+<td>DISCARD enumeration capped at 100 combos (deterministic order)</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>engine.py:413-418</code>, <code>hier_model.DISCARD_INDEX_SIZE=100</code>; <code>test_discard_all_combinations_representable</code> (4 of each, discard 10 ⇒ 101 legal)</td>
+<td>Rare (needs ~18+ cards), but truncation drops the <em>last</em> combos in enumeration order (those discarding the most ore)</td>
+<td>per-resource count heads for discard</td>
+</tr>
+<tr id="f-26">
+<td><a class="fref" href="#f-26">F-26</a></td>
+<td>Flat model encodes owners as absolute-seat scalars</td>
+<td><span class="pill st-confirmed">CONFIRMED</span> (design)</td>
+<td><code>training/model.flatten_observation</code> lines 28,32: <code>(owner+1)/4</code></td>
+<td>Flat model must learn seat-specific decoding; GNN path is relative (fine)</td>
+<td>relative one-hot ownership</td>
+</tr>
+</tbody>
+</table></div>
+</section><section class="card"><h2 id="low-priority-findings-p3">Low-Priority Findings (P3)</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Finding</th>
+<th>Status</th>
+<th>Evidence</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr id="f-09">
+<td><a class="fref" href="#f-09">F-09</a></td>
+<td>Heuristic baseline &amp; search teacher read hidden information</td>
+<td><span class="pill st-confirmed">CONFIRMED</span>, <strong>not material</strong></td>
+<td><code>agents/heuristic.py:151</code> (<code>total_vp</code> incl. hidden VP for robber target), <code>:242</code> (true opponent hands for Monopoly); <code>search_heuristic.eval_state:160</code> (opponents' hidden VP)</td>
+<td><code>HonestHeuristic</code> (public-info replacements, <code>audit/tools/tournament.py</code>) vs 3 originals: <strong>25.3% [24.0, 26.6]</strong> over 4000 seat-balanced games = parity ⇒ cheating gives no measurable edge. Still fix for hygiene; a BC teacher must be imitable</td>
+</tr>
+<tr id="f-11">
+<td><a class="fref" href="#f-11">F-11</a></td>
+<td>Bank-shortage single-player exception missing</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>engine.py:328-332</code>; <code>test_bank_shortage_single_player_gets_remainder</code>; existing <code>tests/test_engine.py::test_bank_shortage_rule_blocks_everyone</code> encodes the incomplete rule</td>
+<td>rare</td>
+</tr>
+<tr id="f-21">
+<td><a class="fref" href="#f-21">F-21</a></td>
+<td>BC validation split by decision, not by game</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>training/bc_pretrain.py:88-89</code> random row permutation</td>
+<td>val NLL optimistic (correlated rows)</td>
+</tr>
+<tr id="f-23">
+<td><a class="fref" href="#f-23">F-23</a></td>
+<td>RNG stream coupling</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td>dice <code>Random(seed)</code> = board <code>Random(seed)</code>; deck <code>Random(seed+1)</code> = next game's board stream</td>
+<td>not a practical leak; use <code>SeedSequence.spawn</code></td>
+</tr>
+<tr id="f-27">
+<td><a class="fref" href="#f-27">F-27</a></td>
+<td>Bank stock and deck size absent from observations</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td><code>build_observation</code></td>
+<td>both are public in Catan; deck size derivable, bank not (because of <a class="fref" href="#f-01">F-01</a>)</td>
+</tr>
+<tr id="f-28">
+<td><a class="fref" href="#f-28">F-28</a></td>
+<td>Port positions evenly spaced, not official frame</td>
+<td><span class="pill st-confirmed">CONFIRMED</span> (documented)</td>
+<td><code>board._assign_ports</code> spacing 30//9=3 → one 6-edge gap</td>
+<td>minor distribution shift</td>
+</tr>
+<tr id="f-29">
+<td><a class="fref" href="#f-29">F-29</a></td>
+<td>README stale/overclaims</td>
+<td><span class="pill st-confirmed">CONFIRMED</span></td>
+<td>"rules-correct, 4-player standard Catan"; "69 passing tests" (actual 121)</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+
+</section><section class="card"><h2 id="architecture-overview">Architecture Overview</h2>
+<pre><code>env/board.py      generate_board()  19 hex / 54 vertex / 72 edge graph, ports, tokens (topology ids are seed-invariant)
+      ↓
+env/state.py      GameState, PlayerState, Phase{SETUP_SETTLEMENT,SETUP_ROAD,ROLL,DISCARD,MOVE_ROBBER,MAIN,TRADE_RESPONSE,GAME_OVER}
+      ↓
+env/engine.py     legal_actions(state) → [Action];  step(state, action, rng) (functional, unvalidated);  acting_player()
+                  production, robber, trade protocol, longest road DFS, largest army, check_win, public card-count estimates
+      ↓
+env/pettingzoo_env.py  CatanAECEnv (AEC): agent_selection = acting_player; Discrete(400) index into legal list;
+                  rewards = rank-based terminal (+ optional VP shaping); truncation = rank on standing
+      ↓
+Observation       flat: build_observation → training/model.flatten_observation  (absolute seat ids)
+                  graph: training/graph_features.build_graph_observation (relative seats, per-node features)
+      ↓
+Policy            training/hier_model.HierarchicalActorCritic (MLP trunk)  |  training/gnn_model.GraphActorCritic
+                  (R-GCN-style message passing over training/board_topology); type head → pointer heads
+                  (vertex/edge/hex/player/resource/resource2/discard_index); masks built from the legal list
+      ↓
+Action            match_action() picks the concrete legal Action → env.step(legal.index(action))
+      ↓
+Rollout/storage   training/hier_ppo.collect_episode (per-agent &quot;reward since last acted&quot;), fork-parallel workers
+      ↓
+Returns           training/ppo.compute_gae per agent trajectory, truncation = terminal
+      ↓
+Update            hier_ppo.ppo_update: clipped surrogate (joint factorised log-prob), MSE value, summed head entropy,
+                  adv-normalisation, grad-clip 0.5, target-KL early stop, optional BC-anchor NLL
+      ↓
+Drivers           train_hier (self-play) · league_train (PFSP league) · bc_pretrain / dagger (imitation of
+                  agents/search_heuristic) · rl_finetune (PPO vs 3 fixed HeuristicAgents, BC anchor)
+      ↓
+Checkpoint        torch.save({&quot;model&quot;,&quot;optimizer&quot;,&quot;iteration&quot;,&quot;args&quot;}) latest.pt / iter_N.pt / best_eval.pt
+      ↓
+Evaluation        train_hier.evaluate_policy (seat 0 only!), league_train (seat-rotated), scripts/evaluate.py,
+                  ad-hoc confirmatories (not in repo)
+</code></pre>
+<p><strong>What the project actually optimises (Phase 2).</strong> The design calls this "self-play MARL", but the strongest
+line in practice (memory) is: imitation of a hand-built search heuristic (BC+DAgger), then PPO fine-tuning
+against <strong>three fixed copies of <code>HeuristicAgent</code></strong>, with the BC anchor. The objective actually measured is
+"win rate in a 1-vs-3 game against one specific heuristic opponent". This is a strong-policy-vs-fixed-bot
+objective, not equilibrium play, not robustness to diverse opponents, and not human-level play on standard
+Catan. The README's "rules-correct, 4-player standard Catan" overstates the simulator (see Known
+Simplifications). No document claims a "solved" game, which is appropriate.</p>
+<p><strong>State machine (reconstructed from <code>engine.step</code>).</strong></p>
+<pre><code>SETUP_SETTLEMENT ⇄ SETUP_ROAD  (order 0,1,2,3,3,2,1,0; 2nd road grants resources)  → ROLL(p0)
+ROLL --roll≠7--&gt; MAIN
+ROLL --roll=7--&gt; DISCARD (each &gt;7 player, in seat order) --&gt; MOVE_ROBBER --&gt; MAIN
+      (no discarders)  ----------------------------------&gt; MOVE_ROBBER
+MAIN --PROPOSE_TRADE--&gt; TRADE_RESPONSE (targets in seat order: ACCEPT/REJECT/COUNTER)
+        COUNTER --&gt; proposer ACCEPT/REJECT counter --&gt; MAIN
+        all responded, ≥1 accept --&gt; proposer CONFIRM(target)/CANCEL --&gt; MAIN ; none --&gt; MAIN
+MAIN --PLAY_ROAD_BUILDING--&gt; MAIN[free roads only + END_TURN]   (F-08)
+MAIN --END_TURN--&gt; ROLL(next player)
+any VP-changing step --check_win (any player!)--&gt; GAME_OVER     (F-03)
+</code></pre>
+<p>Phases are explicit (<code>Phase</code> enum). I found no reachable state with multiple rolls, a skipped mandatory
+discard or robber move, a stuck state, or a skipped player: 12,000 fuzzed games with invariant checks after
+every step, plus <code>test_roll_only_once_and_main_has_no_roll</code> and <code>test_seven_discard_threshold_and_order</code>.</p>
+
+</section><section class="card"><h2 id="catan-rules-coverage">Catan Rules Coverage</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Rule / Mechanic</th>
+<th style="text-align: center;">Implemented</th>
+<th style="text-align: center;">Tested (audit)</th>
+<th style="text-align: center;">Correct</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>19 hexes, 4/3/4/4/3/1 terrain, 18 tokens</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span> 200 seeds</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Topology 54 vertices / 72 edges, adjacency</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td>degrees {2:18,3:36}; ids stable across seeds</td>
+</tr>
+<tr>
+<td>Robber starts on desert</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>9 harbors (4×3:1, 5×2:1), 2 coastal vertices each</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td>positions not official (<a class="fref" href="#f-28">F-28</a>)</td>
+</tr>
+<tr>
+<td>6/8 not adjacent (random set-up)</td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td><a class="fref" href="#f-10">F-10</a></td>
+</tr>
+<tr>
+<td>Snake setup order, settlement→adjacent road</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Setup distance rule</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>2nd-settlement starting resources</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td>bank not debited (<a class="fref" href="#f-01">F-01</a>)</td>
+</tr>
+<tr>
+<td>Roll once; 7 → discard ⌊n/2⌋ if &gt;7; all players; before robber</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Robber must move; victims adjacent; random steal</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span> (4000 steals, χ ok)</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td>0-card victim selectable (allowed)</td>
+</tr>
+<tr>
+<td>Production incl. city ×2, robber block, desert</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Bank shortage</td>
+<td style="text-align: center;">partial</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td>single-player exception missing (<a class="fref" href="#f-11">F-11</a>)</td>
+</tr>
+<tr>
+<td>Road/settlement/city/dev costs</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Piece limits 15/5/4, settlement returned on city</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Road connectivity, opponent-vertex blocking</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Dev deck 14/5/2/2/2</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Not playable turn bought; 1 per turn; VP exempt</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Play dev card before rolling</td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td><a class="fref" href="#f-07">F-07</a></td>
+</tr>
+<tr>
+<td>Knight → robber + Largest Army</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Road Building</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;">partial</td>
+<td>turn lock (<a class="fref" href="#f-08">F-08</a>)</td>
+</tr>
+<tr>
+<td>Year of Plenty (bank-limited)</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Monopoly</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Maritime 4:1 / 3:1 / 2:1</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;">partial</td>
+<td>no bank-stock check (<a class="fref" href="#f-02">F-02</a>)</td>
+</tr>
+<tr>
+<td>Domestic trade</td>
+<td style="text-align: center;">simplified</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span> (variant)</td>
+<td>1:1, broadcast, 2/turn, ACCEPT w/o cards (<a class="fref" href="#f-13">F-13</a>, <a class="fref" href="#f-20">F-20</a>)</td>
+</tr>
+<tr>
+<td>Longest Road length (trails, branches, loops, blocking)</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span> oracle</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td>0 mismatches / ~48k networks + 300 hand-built</td>
+</tr>
+<tr>
+<td>Longest Road ≥5, ties keep holder, broken→set aside on tie</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td>matches almanac "Special Case"</td>
+</tr>
+<tr>
+<td>Largest Army ≥3 played knights, strict transfer</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>VP sources incl. hidden VP cards; ≥10 wins</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Win only on own turn</td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td><a class="fref" href="#f-03">F-03</a></td>
+</tr>
+<tr>
+<td>No mutation after GAME_OVER</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td>legal_actions empty; env dead-step requires None</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Longest Road</strong> (Phase 11): <code>compute_longest_road_length</code> is an edge-simple trail DFS from every vertex. It
+refuses to pass <em>through</em> an opponent-occupied vertex but allows a trail to start or end there. The audit's
+oracle (<code>audit/helpers.reference_longest_road</code>) is independent of the DFS. It enumerates edge subsets and
+accepts those that are connected with 0 or 2 odd-degree vertices, where an opponent-blocked vertex may only be
+an endpoint and a circuit may be anchored at a single blocked vertex. Results:
+- Engine and oracle agree on every end-of-game network in 10,000 random and 2,000 heuristic games, plus 300
+  random hand-built networks (5–12 edges, 0–2 blockers).
+- The one early disagreement (seed 10000789) was a bug in <strong>my</strong> oracle: it allowed a circuit through two
+  blocked vertices. The engine was right.
+- Transfers, tie retention, and the "broken road, other players tie → set aside" case are tested explicitly.</p>
+<p>Verdict: <strong>correct</strong>.</p>
+
+</section><section class="card"><h2 id="observation-space-audit">Observation-Space Audit</h2>
+<p>Counterfactual method (<code>audit/tests/test_obs_leakage.py</code>), run on 40 mid-game heuristic states × 4 observers ×
+3 re-deals:
+1. Re-deal everything observer A cannot see: opponents' resource identities (hand sizes kept), opponents'
+   dev-card identities (counts and bought-this-turn counts kept), and deck order.
+2. Assert that A's flat dict, flattened vector, graph features, <strong>and legal-action list</strong> are byte-identical.</p>
+<p>This passes with <code>public_hand_features</code> both off and on. A guard test confirms the re-deal really changes the
+hidden state. Dynamic tests confirm the public card-count estimates are independent of a stolen card's
+identity and of discard contents.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Feature</th>
+<th style="text-align: center;">Public</th>
+<th style="text-align: center;">Private to player</th>
+<th style="text-align: center;">Hidden</th>
+<th style="text-align: center;">Included?</th>
+<th style="text-align: center;">Correct?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Terrain, numbers, ports, robber</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Buildings / roads (owner, type)</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span> (flat: absolute seat; graph: relative)</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Own resources, own dev cards (+ playable)</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Own hidden VP</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;">graph <span class="ok">✔</span> / flat via dev cards</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Opponent hand sizes, dev-card counts, knights, piece counts, visible VP, awards</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Opponent resource identities</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span> (only public card-count estimate, opt-in)</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Opponent dev-card identities / hidden VP</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Deck order, RNG state, future dice</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Stolen-card identity (to third parties)</td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="bad">✘</span> (estimate uses expectation)</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Dice result, phase, current/acting player</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td>Pending proposal (give/want/proposer)</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+</tr>
+<tr>
+<td><strong>Counter-offer terms</strong></td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><strong><span class="bad">✘</span></strong></td>
+<td style="text-align: center;"><span class="bad">✘</span> (<a class="fref" href="#f-04">F-04</a>)</td>
+</tr>
+<tr>
+<td>Bank stock</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="bad">✘</span></td>
+<td style="text-align: center;">omission (<a class="fref" href="#f-27">F-27</a>)</td>
+</tr>
+<tr>
+<td>Dev deck size</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="bad">✘</span> (derivable)</td>
+<td style="text-align: center;">ok</td>
+</tr>
+<tr>
+<td>Action history / previous robber targets / trade history</td>
+<td style="text-align: center;"><span class="ok">✔</span></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"></td>
+<td style="text-align: center;"><span class="bad">✘</span> (only via card-count estimate)</td>
+<td style="text-align: center;">omission</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Actor/critic boundary (Phase 22):</strong> actor and critic share one trunk and one input. There is no
+centralised critic and no privileged tensor anywhere in the rollout or update path. Training rollouts
+(<code>collect_episode</code>) build the observation from <code>env.engine.state</code> through the same <code>build_graph_observation</code>
+used at evaluation. <strong>No leakage.</strong></p>
+<p><strong>Partial observability (Phase 21):</strong> no recurrence or history. The opt-in public card-count estimates are a
+hand-built belief state over resources, and they are the right minimal fix. Still missing: inferring
+opponents' dev cards from purchase timing, robber/trade history, and counter-offers (<a class="fref" href="#f-04">F-04</a>). A recurrent or
+transformer policy is not obviously required. Adding a short public-event history (last K robber targets,
+trades, dev purchases) is the cheaper next step.</p>
+
+</section><section class="card"><h2 id="action-space-audit">Action-Space Audit</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Action Category</th>
+<th>Encoding (policy)</th>
+<th>Legal mask</th>
+<th>Tested</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Setup settlement / road</td>
+<td>type + vertex / edge pointer</td>
+<td>from legal list</td>
+<td><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Roll dice</td>
+<td>type only</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td>forced (single option)</td>
+</tr>
+<tr>
+<td>Build road / settlement / city</td>
+<td>type + edge / vertex pointer</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Buy dev card</td>
+<td>type</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Knight / Move robber</td>
+<td>type + hex + player(victim or "none")</td>
+<td>stage-2 conditioned on hex</td>
+<td><span class="ok">✔</span></td>
+<td></td>
+</tr>
+<tr>
+<td>Road Building / YoP / Monopoly</td>
+<td>type / resource pair / resource</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td>YoP has two index paths per unordered pair (benign)</td>
+</tr>
+<tr>
+<td>Discard</td>
+<td>flat index into ≤100 enumerated combos</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td><a class="fref" href="#f-12">F-12</a> cap</td>
+</tr>
+<tr>
+<td>Maritime trade</td>
+<td>give + receive resources</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td><a class="fref" href="#f-02">F-02</a> bank stock</td>
+</tr>
+<tr>
+<td>Propose / counter</td>
+<td>1:1 give + want</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td><a class="fref" href="#f-20">F-20</a> unrepresentable multi-card trades</td>
+</tr>
+<tr>
+<td>Accept / reject / confirm / cancel</td>
+<td>type / player pointer</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td><a class="fref" href="#f-13">F-13</a></td>
+</tr>
+<tr>
+<td>End turn</td>
+<td>type</td>
+<td><span class="ok">✔</span></td>
+<td><span class="ok">✔</span></td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<ul>
+<li>Every action chosen by <code>act()</code> comes from <code>legal_actions()</code> (<code>match_action</code> searches the legal list):
+  12,000 sampled decisions, 0 illegal, all log-probs finite
+  (<code>test_masked_heads_never_select_illegal_and_no_nan</code>).</li>
+<li>Masked logits use −1e9 <em>before</em> softmax/sampling, consistently in <code>act</code> and <code>evaluate_actions</code>. Rollout
+  log-probs and values match the PPO recomputation within 1e-4 for both models (≥2,000 transitions each,
+  <code>test_rollout_logprobs_match_evaluate_actions_and_actions_legal</code>).</li>
+<li>The env's <code>Discrete(400)</code> mask is <code>index &lt; len(legal)</code>. That's fine for the API, but its meaning is unstable
+  across steps (the README already documents this). The pointer models don't use it.</li>
+<li>Out-of-range indices raise <code>ValueError</code> with no state change. Illegal <code>Action</code> objects passed straight to
+  <code>engine.step</code> are <strong>accepted and corrupt state</strong> (<a class="fref" href="#f-05">F-05</a>).</li>
+<li>Max legal-list length seen in 12,000 games was 100 (the discard cap), well under 400.</li>
+</ul>
+
+</section><section class="card"><h2 id="reward-audit">Reward Audit</h2>
+<p>For the agent of player <em>i</em> (<code>env/pettingzoo_env.py</code>):</p>
+<p>r_t^i = w · ΔVP_t^i  +  1[terminal or truncated] · R_rank(i)</p>
+<p>R_rank: 1st <strong>+1.0</strong>, 2nd <strong>0.0</strong>, 3rd <strong>−0.5</strong>, 4th <strong>−1.0</strong>. Groups tied on VP share the mean (rank
+derives from total VP, hidden VP included, not from <code>state.winner</code>). w = <code>vp_shaping_weight</code> (<code>train_hier</code>
+default 0.05; <code>rl_finetune</code> uses 0).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Event</th>
+<th style="text-align: right;">Reward</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Win (reach 10 VP on any turn — <a class="fref" href="#f-03">F-03</a>)</td>
+<td style="text-align: right;">+1.0</td>
+</tr>
+<tr>
+<td>Truncation while VP leader</td>
+<td style="text-align: right;"><strong>+1.0</strong> (<a class="fref" href="#f-06">F-06</a>)</td>
+</tr>
+<tr>
+<td>2nd / 3rd / 4th at end</td>
+<td style="text-align: right;">0 / −0.5 / −1.0</td>
+</tr>
+<tr>
+<td>Any VP gained / lost (settlement, city, LR/LA gain or loss, VP card)</td>
+<td style="text-align: right;">±w per VP</td>
+</tr>
+<tr>
+<td>Road, dev purchase, resource gain, trade, illegal action, turn length</td>
+<td style="text-align: right;">0</td>
+</tr>
+</tbody>
+</table></div>
+<p>Reward-hacking analysis:
+- <strong>VP shaping</strong> telescopes to w·(final VP), so it can't be farmed. Award ping-pong is zero-sum. Under γ&lt;1 it
+  rewards <em>early</em> VP over late VP, which pushes toward settlement spam rather than cities and development
+  cards.
+- <strong>Rank reward</strong> values 2nd over 4th by a full win's margin, so the agent will trade win probability for
+  placement.
+- <strong>Truncation</strong> pays the win reward to the leader, so stalling while ahead is rewarded. Stalling is bounded
+  inside a turn (a maximally stalling policy is forced to end its turn within 19 steps; see
+  <code>test_turn_cannot_be_stalled_indefinitely</code>). Across turns it is only mildly exploitable at a 2500-step cap,
+  but dominant at the 600/800 defaults (<a class="fref" href="#f-06">F-06</a>).
+- <strong>No illegal-action penalties</strong> exist and none are needed, since actions are always legal.
+- <strong>Trade loops:</strong> proposals are capped and maritime trades always lose cards. No resource duplication along
+  any trade-protocol path (<code>test_no_resource_duplication_via_trade_paths</code>). The one minting path is <a class="fref" href="#f-02">F-02</a>.</p>
+<p>Does training reward track win rate? In pure self-play the per-episode return is fixed by construction
+(rank rewards sum to −0.5, plus symmetric shaping). Mean training reward therefore <strong>cannot</strong> rise, and
+<code>train_hier</code> doesn't log it. Only held-out evaluations measure progress (see Training Results).</p>
+
+</section><section class="card"><h2 id="marl-algorithm-audit">MARL Algorithm Audit</h2>
+<ul>
+<li><strong>Algorithm:</strong> PPO with <strong>full parameter sharing across all four seats</strong> (one network acts for every seat
+  using its own seat-relative view). It is independent-learner PPO, not MAPPO: no centralised critic, no
+  recurrence.</li>
+<li><strong>Equations checked line by line</strong> (<code>training/ppo.py</code>, <code>training/hier_ppo.py</code>):</li>
+<li>GAE: δ_t = r_t + γV_{t+1}(1−d_t) − V_t; A_t = δ_t + γλ(1−d_t)A_{t+1}; R_t = A_t + V_t. Correct.</li>
+<li>Clipped surrogate on the joint factorised log-prob (type + active sub-heads). Correct, verified
+    numerically.</li>
+<li>Unclipped MSE value loss; entropy = sum of entropies of active heads (so it scales with the number of
+    active heads, a mild bias toward exploring pointer decisions); advantage normalisation per rollout;
+    grad-clip 0.5; KL early stop on |mean approx_kl|. Adam.</li>
+<li><strong>Trajectory segmentation:</strong></li>
+<li>Each agent's transitions form a separate GAE sequence, and reward between two of its own decisions is
+    attributed to the earlier one through <code>last()</code> + <code>clear_reward</code>.</li>
+<li>Every agent's final transition has <code>done=True</code> and receives its terminal reward; sums match the rank
+    table (<code>test_terminal_rewards_delivered_to_every_agent</code>, 20 games).</li>
+<li>No cross-player or cross-episode contamination was found.</li>
+<li><strong>Issues:</strong> γ horizon (<a class="fref" href="#f-15">F-15</a>); truncation (<a class="fref" href="#f-06">F-06</a>); forced single-option transitions stored and discounted
+  (19.9% of rollout transitions); no gradient-norm logging; and <code>rl_finetune</code> selects best checkpoints on a
+  biased, noisy metric (<a class="fref" href="#f-14">F-14</a>).</li>
+</ul>
+
+</section><section class="card"><h2 id="self-play-audit">Self-Play Audit</h2>
+<ul>
+<li><strong><code>train_hier</code></strong> is pure shared-parameter self-play. It has no opponent pool, which makes it vulnerable to
+  cycling and forgetting.</li>
+<li><strong><code>league_train</code></strong> adds PFSP, snapshots, and exploiters, but the promotion gate is effectively unreachable
+  (<a class="fref" href="#f-17">F-17</a>), so the main never changes.</li>
+<li><strong><code>rl_finetune</code></strong>, which produced the champion, is not self-play: it is PPO against <strong>three frozen
+  <code>HeuristicAgent</code>s</strong>. "Improvement" in that line means exploiting one fixed opponent. No evidence exists in the
+  repo for robustness against other styles (search agent, earlier checkpoints, mixed tables).</li>
+<li>The self-play mini-run (below) shows non-monotonic progress against fixed references.</li>
+</ul>
+
+</section><section class="card"><h2 id="controlled-mini-training-experiment-checkpoint-ladder-phases-31-40">Controlled Mini Training Experiment &amp; Checkpoint Ladder (Phases 31, 40)</h2>
+<p>The historical checkpoints are gone (<a class="fref" href="#f-18">F-18</a>), so I trained fresh ones. Command (user-approved compute):
+<code>training.train_hier --model-type hier --hidden 256 --randomize-board --iterations 250 --episodes-per-iter 48
+--num-workers 12 --eval-every 25 --eval-games 60 --max-episode-steps 2500 --seed 0</code>. It ran pure
+shared-parameter self-play, full rules, random boards, VP shaping 0.05 (default), and a GPU update.
+Checkpoints are in <code>audit/results/ckpts/run_a/</code>; the log is <code>audit/results/logs/train_run_a.log</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th style="text-align: right;">iter</th>
+<th style="text-align: right;">transitions</th>
+<th style="text-align: right;">turns/game</th>
+<th style="text-align: right;">finish</th>
+<th style="text-align: right;">value loss</th>
+<th style="text-align: right;">entropy</th>
+<th style="text-align: right;">approx KL</th>
+<th>in-loop vs random (seat 0; same-dist / full)</th>
+<th>in-loop vs heuristic (seat 0)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">82,823</td>
+<td style="text-align: right;">284</td>
+<td style="text-align: right;">85%</td>
+<td style="text-align: right;">0.0115</td>
+<td style="text-align: right;">1.520</td>
+<td style="text-align: right;">0.0055</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td style="text-align: right;">25</td>
+<td style="text-align: right;">53,369</td>
+<td style="text-align: right;">189</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0174</td>
+<td style="text-align: right;">1.443</td>
+<td style="text-align: right;">0.0091</td>
+<td>50% / 48%</td>
+<td>2% / 2%</td>
+</tr>
+<tr>
+<td style="text-align: right;">50</td>
+<td style="text-align: right;">59,775</td>
+<td style="text-align: right;">162</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0126</td>
+<td style="text-align: right;">1.409</td>
+<td style="text-align: right;">0.0092</td>
+<td>52% / 65%</td>
+<td>2% / 2%</td>
+</tr>
+<tr>
+<td style="text-align: right;">75</td>
+<td style="text-align: right;">57,391</td>
+<td style="text-align: right;">156</td>
+<td style="text-align: right;">98%</td>
+<td style="text-align: right;">0.0094</td>
+<td style="text-align: right;">1.369</td>
+<td style="text-align: right;">0.0090</td>
+<td>73% / 75%</td>
+<td>5% / 0%</td>
+</tr>
+<tr>
+<td style="text-align: right;">100</td>
+<td style="text-align: right;">56,422</td>
+<td style="text-align: right;">139</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0090</td>
+<td style="text-align: right;">1.282</td>
+<td style="text-align: right;">0.0097</td>
+<td>73% / 75%</td>
+<td>3% / 2%</td>
+</tr>
+<tr>
+<td style="text-align: right;">125</td>
+<td style="text-align: right;">45,739</td>
+<td style="text-align: right;">135</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0097</td>
+<td style="text-align: right;">1.193</td>
+<td style="text-align: right;">0.0095</td>
+<td>82% / 75%</td>
+<td>2% / 0%</td>
+</tr>
+<tr>
+<td style="text-align: right;">150</td>
+<td style="text-align: right;">44,758</td>
+<td style="text-align: right;">130</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0102</td>
+<td style="text-align: right;">1.139</td>
+<td style="text-align: right;">0.0090</td>
+<td>85% / 77%</td>
+<td>2% / 2%</td>
+</tr>
+<tr>
+<td style="text-align: right;">175</td>
+<td style="text-align: right;">50,557</td>
+<td style="text-align: right;">130</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0093</td>
+<td style="text-align: right;">1.111</td>
+<td style="text-align: right;">0.0093</td>
+<td>83% / 85%</td>
+<td>0% / 5%</td>
+</tr>
+<tr>
+<td style="text-align: right;">200</td>
+<td style="text-align: right;">50,971</td>
+<td style="text-align: right;">142</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0098</td>
+<td style="text-align: right;">1.072</td>
+<td style="text-align: right;">0.0106</td>
+<td>83% / 92%</td>
+<td>3% / 2%</td>
+</tr>
+<tr>
+<td style="text-align: right;">225</td>
+<td style="text-align: right;">45,060</td>
+<td style="text-align: right;">138</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0100</td>
+<td style="text-align: right;">1.032</td>
+<td style="text-align: right;">0.0103</td>
+<td>85% / 92%</td>
+<td>10% / 5%</td>
+</tr>
+<tr>
+<td style="text-align: right;">250</td>
+<td style="text-align: right;">47,922</td>
+<td style="text-align: right;">128</td>
+<td style="text-align: right;">100%</td>
+<td style="text-align: right;">0.0101</td>
+<td style="text-align: right;">1.078</td>
+<td style="text-align: right;">0.0102</td>
+<td>90% / 90%</td>
+<td>3% / 3%</td>
+</tr>
+</tbody>
+</table></div>
+<p>Pipeline health:
+- No NaNs or exploding values.
+- Entropy declines smoothly (1.52 → 1.08), with no collapse to a single action.
+- KL sits in the 0.005–0.011 band, so target-KL early-stopping rarely triggers.
+- Value loss is flat at ~0.01: the value head can't explain much, which is consistent with the γ-limited
+  return targets (<a class="fref" href="#f-15">F-15</a>).
+- Games get shorter (284 → 128 turns), so the policy learns to finish games.</p>
+<p>Self-play learning is real but shallow. Win rate against random rises from ~50% to ~90%, while win rate
+against the heuristic stays at 0–10% throughout. No "suspiciously fast" learning against a meaningful
+opponent was observed. (The 80–90% vs random seen after 2 iterations in a separate GNN timing run is
+<a class="fref" href="#f-19">F-19</a>'s point: that tier saturates almost immediately.)</p>
+<p><strong>Checkpoint ladder.</strong> <code>audit/tools/run_ladder.sh</code> on fresh seed bases 30.0M/30.1M/30.2M. Every board seed is
+played 4× with the candidate rotated through all seats; Wilson 95% CIs.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th style="text-align: right;">Checkpoint</th>
+<th>vs 3 heuristics (1,000 games)</th>
+<th>vs 3 random (400)</th>
+<th><strong>iter_250</strong> vs 3× this ckpt (400)</th>
+<th>per-seat vs heuristic (s0..s3)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">25</td>
+<td>1.9% [1.2, 2.9]</td>
+<td>43.2% [38, 48]</td>
+<td><strong>60.3%</strong> [55, 65]</td>
+<td>3.2 / 0.8 / 2.0 / 1.6</td>
+</tr>
+<tr>
+<td style="text-align: right;">50</td>
+<td>2.3% [1.5, 3.4]</td>
+<td>54.0% [49, 59]</td>
+<td>36.2% [32, 41]</td>
+<td>3.6 / 2.8 / 0.8 / 2.0</td>
+</tr>
+<tr>
+<td style="text-align: right;">75</td>
+<td>2.7% [1.9, 3.9]</td>
+<td>66.5% [62, 71]</td>
+<td>44.8% [40, 50]</td>
+<td>3.6 / 2.8 / 1.6 / 2.8</td>
+</tr>
+<tr>
+<td style="text-align: right;">100</td>
+<td>3.7% [2.7, 5.1]</td>
+<td>81.8% [78, 85]</td>
+<td>32.0% [28, 37]</td>
+<td>4.8 / 2.4 / 5.2 / 2.4</td>
+</tr>
+<tr>
+<td style="text-align: right;">125</td>
+<td>4.4% [3.3, 5.9]</td>
+<td>80.2% [76, 84]</td>
+<td>33.3% [29, 38]</td>
+<td>6.8 / 3.2 / 3.6 / 4.0</td>
+</tr>
+<tr>
+<td style="text-align: right;">150</td>
+<td>2.6% [1.8, 3.8]</td>
+<td>88.7% [85, 91]</td>
+<td>36.2% [32, 41]</td>
+<td>2.4 / 2.4 / 3.2 / 2.4</td>
+</tr>
+<tr>
+<td style="text-align: right;">175</td>
+<td>3.5% [2.5, 4.8]</td>
+<td>84.3% [80, 87]</td>
+<td>28.5% [24, 33]</td>
+<td>5.2 / 3.2 / 2.8 / 2.8</td>
+</tr>
+<tr>
+<td style="text-align: right;">200</td>
+<td>2.6% [1.8, 3.8]</td>
+<td>87.7% [84, 91]</td>
+<td>31.5% [27, 36]</td>
+<td>2.0 / 2.8 / 2.8 / 2.8</td>
+</tr>
+<tr>
+<td style="text-align: right;">225</td>
+<td>3.4% [2.4, 4.7]</td>
+<td>89.7% [86, 92]</td>
+<td>23.3% [19, 28]</td>
+<td>5.2 / 3.2 / 2.8 / 2.4</td>
+</tr>
+<tr>
+<td style="text-align: right;">250</td>
+<td>3.6% [2.6, 4.9]</td>
+<td>85.5% [82, 89]</td>
+<td>25.0% [21, 29] <em>(self = parity check ✓)</em></td>
+<td>3.2 / 3.6 / 3.6 / 4.0</td>
+</tr>
+</tbody>
+</table></div>
+<p>Reading:
+1. <strong>Later checkpoints do beat earlier ones</strong>, and the latest model's edge over older selves shrinks
+   monotonically to parity. Self-play is producing real improvement against its own lineage, with no sign of
+   cycling inside 250 iterations.
+2. That improvement <strong>barely transfers</strong>. Against the fixed heuristic, win rate moves from 1.9% to ~3.5%:
+   statistically detectable (CIs at iterations 25 and 125 don't overlap), but ~20pp below parity after 13M
+   transitions.
+3. <strong>The in-loop metric is not trustworthy for selection.</strong> Its best vs-heuristic reading was iter 225
+   (10%, seat 0, n=60). The seat-balanced n=1,000 value is 3.4%, indistinguishable from neighbouring
+   checkpoints. Selecting on the in-loop maximum would have picked noise (<a class="fref" href="#f-14">F-14</a>, winner's curse).
+4. <strong>Self-play "training reward" can't be correlated with held-out win rate</strong>, because the self-play return
+   is constant by construction (see Reward Audit). Training-side proxies that did move (shorter games, falling
+   entropy, rising vs-random rate) track the ladder's random column, not the heuristic column.
+5. <strong>No seat dependence</strong> is visible at these low rates. This flat model sees absolute seat ids (<a class="fref" href="#f-26">F-26</a>), so
+   seat effects may appear at higher strength. Re-check them with the GNN encoder.</p>
+
+</section><section class="card"><h2 id="evaluation-audit">Evaluation Audit</h2>
+<p>Good practice already in the user's protocol (memory): fresh never-reused seed bases, n≥600, paired seeds,
+and recognition of winner's-curse selection. Problems:</p>
+<ol>
+<li>In-repo in-loop evaluation is seat 0 only (<a class="fref" href="#f-14">F-14</a>).</li>
+<li>No CIs are printed anywhere in-repo. A 120- or 240-game eval has a 95% CI of about ±6–9pp at 25–60%.</li>
+<li>The opponent tier is a single heuristic. The random tier is uninformative (<a class="fref" href="#f-19">F-19</a>).</li>
+<li><code>best_eval.pt</code> = the maximum of ~40 noisy reads, which is selection bias.</li>
+<li>Eval policies run deterministically (argmax) while training samples. This is fine, but should be stated.</li>
+<li>Training and evaluation seeds are disjoint in all drivers (train_hier: training 0…N, evals 800k / 2M + it·k;
+   rl_finetune: training ≤ ~1M, evals 4.7M/4.8M). There's no gradient path from eval games, and models have no
+   dropout or batch-norm, so <code>eval()</code> mode is moot.</li>
+</ol>
+<p><strong>Seat effects (heuristic×4, 4000 games):</strong> 28.3 / 24.5 / 22.9 / 24.3%. Seat 0 is about 3pp above parity.</p>
+
+</section><section class="card"><h2 id="performance-results">Performance Results</h2>
+<p>Measured with <code>audit/tools/profile_perf.py</code>: single process, 1 torch thread, after training had stopped
+(<code>audit/results/perf.json</code>). Training throughput comes from the audit mini-run log (12 fork workers + GPU
+update, partly under contention from concurrent audit jobs).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th style="text-align: right;">Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Engine, random agents</td>
+<td style="text-align: right;"><strong>38,400 steps/s</strong>, 26 games/s per core</td>
+</tr>
+<tr>
+<td>Engine, heuristic agents</td>
+<td style="text-align: right;">34,400 steps/s, 31 games/s per core</td>
+</tr>
+<tr>
+<td>AEC env step incl. <code>last()</code> observation</td>
+<td style="text-align: right;">19,500 steps/s per core</td>
+</tr>
+<tr>
+<td><code>legal_actions</code></td>
+<td style="text-align: right;">13 µs / call</td>
+</tr>
+<tr>
+<td><code>build_observation</code> (flat dict) / + <code>flatten_observation</code></td>
+<td style="text-align: right;">41 µs / 62 µs</td>
+</tr>
+<tr>
+<td><code>build_graph_observation</code></td>
+<td style="text-align: right;">57 µs</td>
+</tr>
+<tr>
+<td>Longest Road, all 4 players</td>
+<td style="text-align: right;">64 µs</td>
+</tr>
+<tr>
+<td>Policy <code>act()</code> hier h=256 (CPU, batch 1)</td>
+<td style="text-align: right;"><strong>347 µs</strong></td>
+</tr>
+<tr>
+<td>Policy <code>act()</code> GNN h=128 L=3 / h=256 L=4 (CPU, batch 1)</td>
+<td style="text-align: right;"><strong>2.5 ms / 7.4 ms</strong></td>
+</tr>
+<tr>
+<td>Self-play rollout, hier, 1 process</td>
+<td style="text-align: right;">417 transitions/s</td>
+</tr>
+<tr>
+<td>Self-play rollout, GNN 256×4, 1 process</td>
+<td style="text-align: right;">133 transitions/s</td>
+</tr>
+<tr>
+<td><code>train_hier</code> hier h=256, 12 workers + GPU PPO (mini-run, 250 iters)</td>
+<td style="text-align: right;"><strong>~4,500 transitions/s</strong> (13.2M in 2,906 s)</td>
+</tr>
+<tr>
+<td><code>train_hier</code> GNN h=128 L=3, 12 workers (timing run)</td>
+<td style="text-align: right;">~290 transitions/s (≈80k per 270 s iteration)</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Bottlenecks</strong> (cProfile of a hier rollout, <code>perf.json</code>):
+1. <strong>Batch-1 policy inference</strong> dominates. It costs 6× the env work for the flat model and 50–130× for the GNN.
+2. Enum hashing (<code>Resource</code>/<code>ActionType</code> dict keys): ~15% of rollout time.
+3. <code>legal_actions</code> and observation building, ~25% combined.</p>
+<p>Longest Road, rendering, logging, and deep copies are <strong>not</strong> bottlenecks. The engine itself is not the
+problem. The fix is architectural: step N environments in lockstep per worker and run one batched forward
+pass (on GPU for the GNN), which typically gains 10–50× at batch 64–256. Only after that are integer-indexed
+arrays instead of Enum-keyed dicts worth doing (~1.3×).</p>
+<p><strong>Scalability</strong> (measured throughput; "transitions" = per-agent decisions, ≈ env steps):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Env steps</th>
+<th style="text-align: right;">hier h=256 (4.5k/s)</th>
+<th style="text-align: right;">GNN 256×4 rollout only (12 × 133 ≈ 1.6k/s)</th>
+<th style="text-align: right;">GNN 256×4 after batched inference (est. 20k/s)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1M</td>
+<td style="text-align: right;">4 min</td>
+<td style="text-align: right;">10 min</td>
+<td style="text-align: right;">&lt;1 min</td>
+</tr>
+<tr>
+<td>10M</td>
+<td style="text-align: right;">37 min</td>
+<td style="text-align: right;">1.7 h</td>
+<td style="text-align: right;">8 min</td>
+</tr>
+<tr>
+<td>100M</td>
+<td style="text-align: right;">6.2 h</td>
+<td style="text-align: right;">17 h (+ GPU update time)</td>
+<td style="text-align: right;">1.4 h</td>
+</tr>
+<tr>
+<td>1B</td>
+<td style="text-align: right;">2.6 days</td>
+<td style="text-align: right;">~7 days (+ updates)</td>
+<td style="text-align: right;">~14 h</td>
+</tr>
+</tbody>
+</table></div>
+<p>Storage per checkpoint: hier ~3 MB (248k params, with Adam state); GNN 256×4 ~47 MB with Adam (3.9M
+params × 4 B × 3). One checkpoint every 25 iterations of a 2,000-iteration run is ~4 GB for the GNN.
+In-memory rollout buffer: GNN observations are 1,420 floats (5.7 KB) per transition, so a 100k-transition
+iteration is ~570 MB of host RAM before tensorisation, which is the limiting factor on the 6 GB GPU.
+Evaluation: a 1,000-game seat-balanced eval of the hier model vs heuristics takes 20 s on 14 cores.
+The GNN is roughly 5–20× slower, inference-bound.</p>
+
+</section><section class="card"><h2 id="testing-results">Testing Results</h2>
+<p>Existing suite: <strong>121 passed</strong> in 155 s (<code>audit/results/baseline_pytest.txt</code>). It is mostly behavioural, not
+just smoke tests.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Subsystem</th>
+<th style="text-align: right;">Existing tests</th>
+<th>Quality</th>
+<th>Missing cases (now covered by audit tests unless noted)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Board</td>
+<td style="text-align: right;">11</td>
+<td>good</td>
+<td>red-number adjacency</td>
+</tr>
+<tr>
+<td>Engine rules</td>
+<td style="text-align: right;">21</td>
+<td>good</td>
+<td>conservation, maritime bank stock, off-turn win, RB lock, pre-roll dev, ACCEPT w/o cards, shortage exception (existing test encodes incomplete rule)</td>
+</tr>
+<tr>
+<td>Longest Road</td>
+<td style="text-align: right;">2</td>
+<td>weak (min length, blocking)</td>
+<td>independent oracle, loops, ties, transfers</td>
+</tr>
+<tr>
+<td>PettingZoo</td>
+<td style="text-align: right;">10</td>
+<td>good (api_test)</td>
+<td>seed_test, obs-in-space under public features, dead-step</td>
+</tr>
+<tr>
+<td>Public hands / leakage</td>
+<td style="text-align: right;">9</td>
+<td>good</td>
+<td>counterfactual observation invariance (all encoders), counter-offer visibility</td>
+</tr>
+<tr>
+<td>Models / PPO</td>
+<td style="text-align: right;">15+8+2</td>
+<td>good</td>
+<td>rollout↔recompute log-prob equality, discount horizon</td>
+</tr>
+<tr>
+<td>League / BC / DAgger</td>
+<td style="text-align: right;">9+6+5+4+7</td>
+<td>exercise code paths</td>
+<td>promotion statistics vs parity</td>
+</tr>
+<tr>
+<td>Evaluation</td>
+<td style="text-align: right;">0</td>
+<td>—</td>
+<td>seat rotation (not added; recommend)</td>
+</tr>
+</tbody>
+</table></div>
+<p>Audit suite (<code>.venv/bin/python -m pytest audit/tests</code>): <strong>264 passed, 12 xfailed (strict)</strong> in 54 s. Every
+xfail was re-run with <code>--runxfail</code> to confirm that it fails on its intended assertion, not on an incidental
+error.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Audit test file</th>
+<th>Covers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>test_rules_audit.py</code></td>
+<td>board (200 seeds), setup, turn machine, production, building, robber/7, dev cards, maritime/domestic trade, Longest Road oracle + transfers, Largest Army, off-turn win, engine validation</td>
+</tr>
+<tr>
+<td><code>test_obs_leakage.py</code></td>
+<td>counterfactual hidden-info invariance (flat + graph + legal list, both feature flags), steal/discard estimate independence, counter-offer visibility</td>
+</tr>
+<tr>
+<td><code>test_env_api_audit.py</code></td>
+<td>terminal reward delivery (20 games), obs ⊂ declared space, determinism, truncation reward, shaping, dead-step</td>
+</tr>
+<tr>
+<td><code>test_policy_pipeline_audit.py</code></td>
+<td>rollout↔<code>evaluate_actions</code> log-prob/value equality (hier + GNN), 12k masked samples, YoP encoding, discount horizon</td>
+</tr>
+<tr>
+<td><code>test_exploits_audit.py</code></td>
+<td>stall bound, trade-path conservation (54 protocol paths), ACCEPT griefing, dev replay, robber self-steal</td>
+</tr>
+</tbody>
+</table></div>
+<p>Randomised invariant fuzzing (<code>audit/tools/fuzz_invariants.py</code>, invariants checked after <strong>every</strong> step):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Run</th>
+<th style="text-align: right;">Games</th>
+<th style="text-align: right;">Steps</th>
+<th>Violations (games)</th>
+<th style="text-align: right;">LR oracle mismatches</th>
+<th style="text-align: right;">Off-turn wins</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>random, absolute conservation</td>
+<td style="text-align: right;">100</td>
+<td style="text-align: right;">132,651</td>
+<td>conservation 89–100% (<a class="fref" href="#f-01">F-01</a>)</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+</tr>
+<tr>
+<td>random, relative conservation</td>
+<td style="text-align: right;">1,000</td>
+<td style="text-align: right;">1.42M</td>
+<td>bank&lt;0: 5 (<a class="fref" href="#f-02">F-02</a>)</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">3</td>
+</tr>
+<tr>
+<td>random, relative conservation</td>
+<td style="text-align: right;">10,000</td>
+<td style="text-align: right;">14.3M</td>
+<td>bank&lt;0: 65 (<a class="fref" href="#f-02">F-02</a>); 1 timeout at 6000 steps</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">15</td>
+</tr>
+<tr>
+<td>heuristic, relative conservation</td>
+<td style="text-align: right;">2,000</td>
+<td style="text-align: right;">2.23M</td>
+<td>bank&lt;0: 1 (<a class="fref" href="#f-02">F-02</a>)</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">4</td>
+</tr>
+</tbody>
+</table></div>
+<p>No other invariant ever fired: piece limits, occupancy, distance rule, road connectivity, robber, dev-card
+and knight conservation, cache sync, award thresholds, and non-empty legal actions.</p>
+
+</section><section class="card"><h2 id="reproducibility-results">Reproducibility Results</h2>
+<p><code>audit/tools/repro_check.sh</code> (hier h=64, 3 iterations × 4 episodes):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Same seed, sequential rollouts, CPU update — metrics</td>
+<td><strong>identical</strong></td>
+</tr>
+<tr>
+<td>Same seed, sequential — final weights</td>
+<td><strong>bit-identical</strong></td>
+</tr>
+<tr>
+<td>Different seed — metrics</td>
+<td>differ (randomness live)</td>
+</tr>
+<tr>
+<td>Same seed, <code>--num-workers 4</code> — metrics / weights</td>
+<td><strong>differ</strong> (<a class="fref" href="#f-22">F-22</a>)</td>
+</tr>
+<tr>
+<td>Engine: same seed + same actions</td>
+<td>identical trajectory (<code>test_determinism_same_seed_same_actions</code>)</td>
+</tr>
+<tr>
+<td>PettingZoo <code>seed_test</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table></div>
+<p>The guarantee: engine games and sequential training are reproducible, but every real (parallel) training run
+is not. GPU updates were not tested for determinism. <code>torch.use_deterministic_algorithms</code> is never set.</p>
+
+</section><section class="card"><h2 id="exploitability-reward-hacking-risks">Exploitability / Reward-Hacking Risks</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Exploit attempt</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Illegal action through policy/env</td>
+<td>closed (mask-by-construction; bad indices raise)</td>
+</tr>
+<tr>
+<td>Illegal action through <code>engine.step</code></td>
+<td><strong>open</strong> (<a class="fref" href="#f-05">F-05</a>) — not policy-reachable</td>
+</tr>
+<tr>
+<td>Build without paying / duplicate resources</td>
+<td>closed, except <strong>maritime trade with empty bank mints a card</strong> (<a class="fref" href="#f-02">F-02</a>) and setup grants (<a class="fref" href="#f-01">F-01</a>)</td>
+</tr>
+<tr>
+<td>Replay dev cards / play VP card / same-turn play</td>
+<td>closed</td>
+</tr>
+<tr>
+<td>Longest Road / Largest Army farming</td>
+<td>closed (shaping telescopes)</td>
+</tr>
+<tr>
+<td>Infinite in-turn loop / stall</td>
+<td>closed (max 19 steps/turn under stalling policy)</td>
+</tr>
+<tr>
+<td>Stall-to-truncation while leading</td>
+<td><strong>open</strong> under default caps (<a class="fref" href="#f-06">F-06</a>)</td>
+</tr>
+<tr>
+<td>Griefing: ACCEPT without cards to burn proposals</td>
+<td><strong>open</strong> (<a class="fref" href="#f-13">F-13</a>)</td>
+</tr>
+<tr>
+<td>Hidden info via robber/trade/malformed actions</td>
+<td>closed (masks independent of hidden info)</td>
+</tr>
+<tr>
+<td>Off-turn win</td>
+<td><strong>open</strong>, rare (<a class="fref" href="#f-03">F-03</a>)</td>
+</tr>
+</tbody>
+</table></div>
+
+</section><section class="card"><h2 id="known-simplifications-from-standard-catan">Known Simplifications From Standard Catan</h2>
+<ol>
+<li>Domestic trades are 1-for-1 only, always broadcast to all opponents, capped at 2 per turn; counters are 1:1
+   and invisible to the proposer (<a class="fref" href="#f-04">F-04</a>, <a class="fref" href="#f-20">F-20</a>).</li>
+<li>No development cards before the roll (<a class="fref" href="#f-07">F-07</a>).</li>
+<li>Road Building locks the rest of the turn (<a class="fref" href="#f-08">F-08</a>).</li>
+<li>Bank supply is inflated by setup grants (<a class="fref" href="#f-01">F-01</a>); maritime trades ignore supply (<a class="fref" href="#f-02">F-02</a>); no single-player
+   shortage exception (<a class="fref" href="#f-11">F-11</a>).</li>
+<li>Win checked for every player at any time (<a class="fref" href="#f-03">F-03</a>).</li>
+<li>Board: unconstrained 6/8 placement (<a class="fref" href="#f-10">F-10</a>); evenly spaced harbors (<a class="fref" href="#f-28">F-28</a>).</li>
+<li>Discard options truncated at 100 combinations (<a class="fref" href="#f-12">F-12</a>).</li>
+<li>4 players only; no 5–6 player or expansion rules (appropriate scope).</li>
+</ol>
+<p>These should be stated as "Catan variant V1" in the README and in any reported result.</p>
+
+</section><section class="card"><h2 id="recommended-fixes">Recommended Fixes</h2>
+<p>In priority order:
+- <a class="fref" href="#f-14">F-14</a>: seat rotation.
+- <a class="fref" href="#f-06">F-06</a>: truncation reward and defaults.
+- <a class="fref" href="#f-15">F-15</a>: γ/λ.
+- <a class="fref" href="#f-04">F-04</a>: counter visibility.
+- <a class="fref" href="#f-03">F-03</a>: own-turn win.
+- <a class="fref" href="#f-01">F-01</a>/<a class="fref" href="#f-02">F-02</a>: conservation.
+- <a class="fref" href="#f-07">F-07</a>: pre-roll dev cards.
+- <a class="fref" href="#f-08">F-08</a>: Road Building lock.
+- <a class="fref" href="#f-13">F-13</a>: ACCEPT gating.
+- <a class="fref" href="#f-05">F-05</a>: validation flag.
+- <a class="fref" href="#f-22">F-22</a>: worker seeding.
+- <a class="fref" href="#f-10">F-10</a>: token placement.
+- <a class="fref" href="#f-17">F-17</a>: promotion p0.
+- <a class="fref" href="#f-24">F-24</a>: defaults.</p>
+<p>The rule fixes change the game, so all existing checkpoints and their numbers become stale once they land.
+That is acceptable here, since the champion is already lost (<a class="fref" href="#f-18">F-18</a>).</p>
+</section><section class="card"><h2 id="recommended-new-tests">Recommended New Tests</h2>
+<p>All of these exist in <code>audit/tests/</code>. Promote them into <code>tests/</code> when the fixes land:
+- conservation after setup and after every step;
+- <code>test_maritime_trade_requires_bank_stock</code>;
+- <code>test_cannot_win_on_another_players_turn</code>;
+- <code>test_counter_offer_terms_visible_to_proposer</code>;
+- <code>test_knight_playable_before_roll</code>;
+- <code>test_road_building_does_not_lock_turn</code>;
+- the counterfactual observation-invariance test;
+- the Longest Road oracle test;
+- the rollout/recompute log-prob test;
+- a 1,000-game invariant fuzz as a slow-marked test.</p>
+<p>Still to add:
+- seat-rotation assertion for <code>evaluate_policy</code>;
+- truncation-reward test;
+- GPU determinism test.</p>
+</section><section class="card"><h2 id="recommended-training-improvements">Recommended Training Improvements</h2>
+<ol>
+<li><strong>Objective:</strong> win/loss terminal reward (+1, −1/3 each loser) for strength runs; drop the rank reward, or
+   anneal it.</li>
+<li><strong>Horizon:</strong> γ=0.999–1.0, λ=0.98–1.0, skip forced transitions, consider per-turn discounting.</li>
+<li><strong>Truncation:</strong> bootstrap V(s_T) with 0 reward, or pay 0 and cap at ≥4000 steps.</li>
+<li><strong>Opponents:</strong> a fixed mixed pool for both training and evaluation (heuristic, search, honest-heuristic,
+   ≥3 historical checkpoints), so the target is no longer one exploitable bot. Fix promotion p0 (<a class="fref" href="#f-17">F-17</a>).</li>
+<li><strong>Search at inference:</strong> memory shows the determinised-rollout wrapper adds ~+2pp at deploy time. Combining
+   it with a properly long-horizon value function (point 2) is the most promising path to "stronger than the
+   teacher", rather than a larger network.</li>
+</ol>
+</section><section class="card"><h2 id="recommended-evaluation-protocol">Recommended Evaluation Protocol</h2>
+<p>For each candidate:
+- <strong>Pool:</strong> fixed opponent pool {heuristic, honest-heuristic, search (depth 2), previous champion, two older
+  checkpoints}.
+- <strong>Seeds:</strong> a held-out seed list (e.g. 50,000,000+, never used by any trainer). Each seed is played <strong>four
+  times, once per seat</strong>, using <code>audit/tools/tournament.py</code>.
+- <strong>Sample size:</strong> ≥1,000 seeds (4,000 games) per opponent for claims, or 250 seeds for screening.
+- <strong>Primary metric:</strong> win rate with a Wilson 95% CI. Comparisons between two candidates use paired seeds and
+  a paired test (McNemar, or bootstrap over seeds).
+- <strong>Secondary metrics:</strong> per-seat win rate, average VP, game length, timeouts, build mix, trade rate.
+- <strong>Selection:</strong> candidates are chosen on a <em>separate</em> selection seed set and confirmed on the held-out set.
+  Never select on the confirmation set.</p>
+</section><section class="card"><h2 id="roadmap">Roadmap</h2>
+<h3 id="immediate-before-any-more-serious-training">Immediate — Before Any More Serious Training</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Item</th>
+<th style="text-align: center;">Impact</th>
+<th style="text-align: center;">Difficulty</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Seat-rotate <code>evaluate_policy</code> / <code>fixed_seed_eval</code>; print Wilson CIs; stop selecting <code>best_eval</code> on the in-loop max (<a class="fref" href="#f-14">F-14</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Truncation: no win reward on truncation (0 + bootstrap), defaults ≥4000 steps, <code>--randomize-board</code> on by default (<a class="fref" href="#f-06">F-06</a>, <a class="fref" href="#f-24">F-24</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Raise γ/λ (≥0.999 / ≥0.98) and drop forced single-action transitions (<a class="fref" href="#f-15">F-15</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Add counter-offer terms to both observation encoders (<a class="fref" href="#f-04">F-04</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Durable checkpoint storage + per-run manifest (git SHA, args, seeds, eval JSON) (<a class="fref" href="#f-18">F-18</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Deterministic worker seeding (base seed + iteration + worker index) (<a class="fref" href="#f-22">F-22</a>)</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="phase-1-environment-correctness">Phase 1 — Environment Correctness</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Item</th>
+<th style="text-align: center;">Impact</th>
+<th style="text-align: center;">Difficulty</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Own-turn-only win, claimed at start of turn (<a class="fref" href="#f-03">F-03</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Debit bank on setup grant; bank-stock check on maritime trade; single-player shortage exception (<a class="fref" href="#f-01">F-01</a>, <a class="fref" href="#f-02">F-02</a>, <a class="fref" href="#f-11">F-11</a>)</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Pre-roll development cards (<a class="fref" href="#f-07">F-07</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">MEDIUM</td>
+</tr>
+<tr>
+<td>Road Building: allow continuing the turn / skipping (<a class="fref" href="#f-08">F-08</a>)</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>ACCEPT only if responder can pay (<a class="fref" href="#f-13">F-13</a>)</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td><code>step(validate=True)</code> guard (<a class="fref" href="#f-05">F-05</a>)</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>No adjacent 6/8 in board generation (<a class="fref" href="#f-10">F-10</a>)</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Promote <code>audit/tests</code> into <code>tests/</code>; add slow-marked 1,000-game invariant fuzz to CI</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Richer domestic trade (multi-card, targeted) with an explicit negotiation budget (<a class="fref" href="#f-20">F-20</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">HIGH</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="phase-2-training-correctness">Phase 2 — Training Correctness</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Item</th>
+<th style="text-align: center;">Impact</th>
+<th style="text-align: center;">Difficulty</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Win/loss terminal objective for strength runs; anneal VP shaping (<a class="fref" href="#f-16">F-16</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Fixed mixed opponent pool for RL instead of 3× one heuristic</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">MEDIUM</td>
+</tr>
+<tr>
+<td>Fix league promotion test (p0=0.25 or 2-seat format) so the league actually turns over (<a class="fref" href="#f-17">F-17</a>)</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Log gradient norms, explained variance, per-head entropy</td>
+<td style="text-align: center;">LOW</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Re-derive the BC → DAgger → RL lineage on the corrected engine (artifacts lost anyway)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">MEDIUM</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="phase-3-evaluation">Phase 3 — Evaluation</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Item</th>
+<th style="text-align: center;">Impact</th>
+<th style="text-align: center;">Difficulty</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Adopt <code>audit/tools/tournament.py</code> protocol (all-seats per seed, held-out seeds, CIs, paired comparisons)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Opponent pool: heuristic, honest-heuristic, search, ≥3 historical checkpoints; drop random as a strength tier (<a class="fref" href="#f-19">F-19</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Separate selection vs confirmation seed sets; a seed registry file in the repo</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+<tr>
+<td>Group BC validation split by game (<a class="fref" href="#f-21">F-21</a>)</td>
+<td style="text-align: center;">LOW</td>
+<td style="text-align: center;">LOW</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="phase-4-performance">Phase 4 — Performance</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Item</th>
+<th style="text-align: center;">Impact</th>
+<th style="text-align: center;">Difficulty</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vectorised rollouts: N envs per worker + batched (GPU) inference — the dominant cost (<a class="fref" href="#f-25">F-25</a>)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">MEDIUM</td>
+</tr>
+<tr>
+<td>Integer-indexed arrays instead of Enum-keyed dicts in engine/obs</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">MEDIUM</td>
+</tr>
+<tr>
+<td>Incremental legal-action / observation caches</td>
+<td style="text-align: center;">LOW</td>
+<td style="text-align: center;">MEDIUM</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="phase-5-stronger-catan-ai">Phase 5 — Stronger Catan AI</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Item</th>
+<th style="text-align: center;">Impact</th>
+<th style="text-align: center;">Difficulty</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Long-horizon value function + determinised search at inference (memory: rollout wrapper already +~2pp at deploy)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">MEDIUM</td>
+</tr>
+<tr>
+<td>Public-event history / belief features (dev-card purchase timing, robber/trade history) before any recurrent model</td>
+<td style="text-align: center;">MEDIUM</td>
+<td style="text-align: center;">MEDIUM</td>
+</tr>
+<tr>
+<td>Population-based / league self-play with an exploitability probe (train a fresh exploiter vs the champion)</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">HIGH</td>
+</tr>
+<tr>
+<td>Learned negotiation once trading is un-simplified</td>
+<td style="text-align: center;">HIGH</td>
+<td style="text-align: center;">HIGH</td>
+</tr>
+</tbody>
+</table></div>
+
+</section><section class="card"><h2 id="answers-to-the-25-questions">Answers to the 25 Questions</h2>
+<ol>
+<li><strong>Is the simulated game legal standard Catan?</strong> No. It is a close variant with 1:1-only broadcast
+   trading capped at 2 proposals per turn, no pre-roll dev cards, a Road Building turn lock, off-turn wins,
+   setup-grant and maritime conservation bugs, and unconstrained 6/8 placement. The core mechanics are
+   correct, including production, robber, discard, dev cards, Longest Road, and Largest Army.</li>
+<li><strong>Can any player observe information a real player could not know?</strong> No. Counterfactual tests over every
+   encoder, both feature flags, and the legal-action list found no leakage. (The <em>heuristic opponents</em> do read
+   hidden state, with no measurable benefit: <a class="fref" href="#f-09">F-09</a>.)</li>
+<li><strong>Can the policy execute an illegal action?</strong> No. Actions are chosen from the legal list (0 illegal in
+   12,000 samples) and bad env indices raise. <code>engine.step</code> itself would accept illegal actions (<a class="fref" href="#f-05">F-05</a>), but the
+   policy can't reach that path.</li>
+<li><strong>Can any legal Catan action not be represented?</strong> Yes: multi-card or targeted domestic trades, pre-roll
+   dev cards, discards beyond the 100-combination cap, and continuing a turn after Road Building.</li>
+<li><strong>Is Longest Road unquestionably correct?</strong> Yes, within what can be tested. Zero mismatches against an
+   independent subset-enumeration oracle on ~52,000 networks plus 300 hand-built graphs; tie, transfer, and
+   set-aside cases match the official almanac.</li>
+<li><strong>Is the robber implemented correctly?</strong> Yes: discard threshold and amount, ordering, mandatory move,
+   victim eligibility, and uniform random steal (4,000-trial test). The steal identity is hidden from
+   third parties.</li>
+<li><strong>Are development cards correctly hidden and timed?</strong> Hidden: yes. Timing: mostly. Not playable on the
+   turn bought, one per turn, VP cards count immediately. Pre-roll play is missing (<a class="fref" href="#f-07">F-07</a>).</li>
+<li><strong>Is trading faithfully represented?</strong> No (<a class="fref" href="#f-20">F-20</a>, <a class="fref" href="#f-04">F-04</a>, <a class="fref" href="#f-13">F-13</a>). Maritime trading is right except for the
+   bank-stock check (<a class="fref" href="#f-02">F-02</a>).</li>
+<li><strong>Are victory points and termination correct?</strong> VP accounting yes. Termination no: off-turn wins occur in
+   about 0.2% of games (<a class="fref" href="#f-03">F-03</a>). Every agent is terminated correctly and nothing mutates after GAME_OVER.</li>
+<li><strong>Is the PettingZoo/MARL interface correct?</strong> Yes. Official <code>api_test</code> and <code>seed_test</code> pass, reward
+    bookkeeping is verified, and observations stay within the declared spaces. Non-standard but documented:
+    the <code>clear_reward</code> helper and the <code>Discrete(400)</code> index-into-legal-list encoding.</li>
+<li><strong>Is deterministic evaluation possible?</strong> Yes for engine games and single-process evaluation. No for
+    parallel training rollouts (<a class="fref" href="#f-22">F-22</a>).</li>
+<li><strong>Does the reward optimise winning?</strong> No. It optimises rank and VP, and pays truncation like a win
+    (<a class="fref" href="#f-06">F-06</a>, <a class="fref" href="#f-16">F-16</a>).</li>
+<li><strong>Can the agent exploit reward shaping?</strong> Only mildly. VP shaping telescopes, so it can't be farmed. The
+    real exploit is stalling into truncation while leading under the default step caps.</li>
+<li><strong>Can the agent exploit simulator bugs?</strong> Marginally: minting a card through maritime trade with an empty
+    bank (<a class="fref" href="#f-02">F-02</a>), griefing trade proposals (<a class="fref" href="#f-13">F-13</a>), and rare off-turn wins (<a class="fref" href="#f-03">F-03</a>). No free building, no dev-card
+    replay, and no infinite loops.</li>
+<li><strong>Does higher training reward correlate with held-out win rate?</strong> It can't be measured. Self-play return
+    is constant by construction and isn't logged. Training proxies tracked the vs-random tier, not the
+    vs-heuristic tier.</li>
+<li><strong>Does a later checkpoint reliably beat earlier ones?</strong> Yes, against its own lineage: 60% → 25% (parity)
+    across iterations 25 → 250. But the gain against a fixed heuristic is tiny (1.9% → 3.6%).</li>
+<li><strong>Are results robust across seats?</strong> Seat 0 is the best seat (+3.3pp for heuristic×4; +7pp for search vs
+    heuristic). In-loop evaluations use seat 0 only, so they are biased (<a class="fref" href="#f-14">F-14</a>).</li>
+<li><strong>Are results robust across board seeds?</strong> Evaluations use fresh random boards. The training distribution
+    differs from official boards (<a class="fref" href="#f-10">F-10</a>). Per-board variance is averaged out by the all-seats-per-seed protocol.</li>
+<li><strong>Is self-play producing genuine improvement rather than cycling?</strong> In the mini-run it improves
+    monotonically against its own history (no cycling in 250 iterations), but it transfers poorly to a
+    differently-styled opponent. The production line isn't self-play at all.</li>
+<li><strong>Is the algorithm appropriate for partial observability?</strong> Adequate for now. A hand-built belief
+    (card-count estimates) is used and there is no memory. The bigger limits are the missing counter-offer
+    terms and missing public history, not the absence of an LSTM.</li>
+<li><strong>Are actor and critic information boundaries correct?</strong> Yes. They share inputs, and no privileged
+    state exists anywhere.</li>
+<li><strong>Are training and evaluation isolated?</strong> Yes for seeds and gradients. Selection is not isolated:
+    <code>best_eval</code> is chosen on the same in-loop seeds that it reports.</li>
+<li><strong>Are reported win rates statistically meaningful?</strong> In-repo, no: no CIs, 120–240 games, seat 0 only.
+    The memory-recorded confirmatory protocol (fresh seeds, n≥600–3,000, paired) is sound, but those
+    results can no longer be re-checked (<a class="fref" href="#f-18">F-18</a>).</li>
+<li>
+<p><strong>What prevents a substantially stronger agent?</strong> In order:</p>
+<ul>
+<li>credit assignment (γ horizon, <a class="fref" href="#f-15">F-15</a>);</li>
+<li>training against a single fixed opponent with a rank/VP objective;</li>
+<li>a simplified trading game with blind counters;</li>
+<li>inference-bound throughput, which caps GNN RL at ~10⁶–10⁷ steps per day;</li>
+<li>noisy, seat-biased selection.</li>
+</ul>
+<p>Network size is not the bottleneck.
+25. <strong>Five highest-value next steps:</strong>
+1. Fix the evaluation protocol: all-seats-per-seed, CIs, no in-loop-max selection.
+2. Use γ≈0.999+ with a win/loss reward and bootstrapped truncation.
+3. Fix the rule and observation bugs (<a class="fref" href="#f-01">F-01</a>/02/03/04/07/08/13) and rebuild the lineage on the corrected
+   engine.
+4. Vectorise rollouts with batched GPU inference.
+5. Train and evaluate against a fixed, diverse opponent pool, then add determinised search at inference
+   on top of the better value function.</p>
+</li>
+</ol></section>
+</main>
+</div>
+<a class="totop" href="#">↑ Top</a>
+<script>
+(function(){
+  if(matchMedia('(max-width: 960px)').matches){document.getElementById('tocd').removeAttribute('open');}
+  const root=document.documentElement, btn=document.getElementById('theme');
+  function cur(){return root.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}
+  try{const s=localStorage.getItem('audit-theme'); if(s) root.dataset.theme=s;}catch(e){}
+  btn.textContent = cur()==='dark' ? 'Light mode' : 'Dark mode';
+  btn.onclick=function(){const n=cur()==='dark'?'light':'dark'; root.dataset.theme=n;
+    btn.textContent = n==='dark' ? 'Light mode' : 'Dark mode'; try{localStorage.setItem('audit-theme',n);}catch(e){}};
+  const links=[...document.querySelectorAll('nav.toc a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const obs=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
+    links.forEach(l=>l.classList.remove('active')); const a=map.get(e.target.id); if(a) a.classList.add('active');}})},
+    {rootMargin:'0px 0px -75% 0px'});
+  document.querySelectorAll('section.card h2[id]').forEach(h=>obs.observe(h));
+})();
+</script>
+</body>
+</html>

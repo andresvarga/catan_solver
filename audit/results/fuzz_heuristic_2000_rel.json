@@ -1,0 +1,76 @@
+{
+ "games": 2000,
+ "agent": "heuristic",
+ "seed_base": 12000000,
+ "seconds": 131.1,
+ "finished": 2000,
+ "total_steps": 2232918,
+ "games_with_violation_kind": {
+  "bank[wood]": 1
+ },
+ "first_violation": {
+  "bank[wood]": {
+   "msg": "bank[wood]=-1 < 0",
+   "seed": 12001242,
+   "step": 906,
+   "action": "maritime_trade({'give': <Resource.WHEAT: 'wheat'>, 'receive': <Resource.WOOD: 'wood'>})"
+  }
+ },
+ "longest_road_mismatches": 0,
+ "longest_road_mismatch_examples": [],
+ "winner_seat": {
+  "3": 481,
+  "1": 536,
+  "0": 526,
+  "2": 457
+ },
+ "winner_not_current_player": 4,
+ "off_turn_win_seeds": [
+  12000927,
+  12001048,
+  12001189,
+  12001747
+ ],
+ "timeouts": 0,
+ "games_with_nonwinner_ge10": 1,
+ "winner_vp_hist": {
+  "10": 1920,
+  "11": 80
+ },
+ "max_legal_actions": 100,
+ "mean_turns": 114.184,
+ "mean_steps": 1116.459,
+ "action_type_totals": {
+  "build_settlement": 25339,
+  "build_road": 75831,
+  "roll_dice": 228368,
+  "propose_trade": 417060,
+  "counter_trade": 380173,
+  "reject_trade": 367928,
+  "end_turn": 226368,
+  "move_robber": 37874,
+  "maritime_trade": 93098,
+  "discard": 14415,
+  "buy_dev_card": 45249,
+  "accept_trade": 237473,
+  "confirm_trade": 36774,
+  "play_knight": 24809,
+  "build_city": 15320,
+  "play_monopoly": 3311,
+  "play_year_of_plenty": 3528
+ },
+ "min_bank_end": {
+  "wood": 3,
+  "brick": 2,
+  "sheep": 0,
+  "wheat": 4,
+  "ore": 0
+ },
+ "max_bank_end": {
+  "wood": 25,
+  "brick": 23,
+  "sheep": 23,
+  "wheat": 24,
+  "ore": 24
+ }
+}

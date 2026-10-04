@@ -5,3 +5,7 @@ __pycache__/
 checkpoints*/
 logs/
 .idea/
+# audit artifacts too large or not ours to redistribute (kept locally)
+audit/results/ckpts/
+audit/results/repro/
+audit/results/catan_rules_2020.*
