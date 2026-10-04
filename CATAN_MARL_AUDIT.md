@@ -31,12 +31,12 @@ The findings below describe the code **as audited** (`6e6949a`). Since then:
 | F-20 1:1-only trading | **Fixed (bounded variant)**: 1-3 cards per side, targeted or broadcast, multi-card counters, 4 proposals/turn, structured actions + autoregressive bundle head | commit `cfe8b96` |
 | F-13 ACCEPT without paying | **Fixed** as part of F-20 | `cfe8b96` |
 | F-05 no step validation | **Fixed for agent/training paths**: `CatanEngine.step` and `CatanAECEnv.step` validate; raw `engine.step` stays unchecked by design (search simulations) | `cfe8b96` |
-| F-22 parallel rollouts not reproducible | **Fixed**: per-episode seeding + seed-ordered reassembly; same-seed parallel runs give bit-identical weights | roadmap Phase 1 commit |
-| F-01 setup grants minted | **Fixed**: grants debit the bank; strict 95-card conservation holds in 1,200 fuzzed games | roadmap Phase 1 commit |
-| F-02 maritime ignores bank stock | **Fixed** | roadmap Phase 1 commit |
-| F-11 shortage exception | **Fixed** (single owed player takes the remainder) | roadmap Phase 1 commit |
-| F-10 adjacent 6/8 | **Fixed** for random and fixed boards (tokens re-dealt with the board's seeded rng) | roadmap Phase 1 commit |
-| Audit tests in default run | **Done**: `pytest.ini` runs `tests/` + `audit/tests/`; `pytest -m slow` runs the 1,200-game invariant fuzz | roadmap Phase 1 commit |
+| F-22 parallel rollouts not reproducible | **Fixed**: per-episode seeding + seed-ordered reassembly; same-seed parallel runs give bit-identical weights | `62fb8e9` |
+| F-01 setup grants minted | **Fixed**: grants debit the bank; strict 95-card conservation holds in 1,200 fuzzed games | `62fb8e9` |
+| F-02 maritime ignores bank stock | **Fixed** | `62fb8e9` |
+| F-11 shortage exception | **Fixed** (single owed player takes the remainder) | `62fb8e9` |
+| F-10 adjacent 6/8 | **Fixed** for random and fixed boards (tokens re-dealt with the board's seeded rng) | `62fb8e9` |
+| Audit tests in default run | **Done**: `pytest.ini` runs `tests/` + `audit/tests/`; `pytest -m slow` runs the 1,200-game invariant fuzz | `62fb8e9` |
 | F-12, F-16, F-17, F-19, F-21, F-23–F-29 | Open | — |
 
 ## Executive Summary
