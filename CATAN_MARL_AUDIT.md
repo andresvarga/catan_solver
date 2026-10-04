@@ -47,8 +47,8 @@ The findings below describe the code **as audited** (`6e6949a`). Since then:
 | Seed registry | **Done**: named inloop/selection/confirm sets, training-overlap guard in every driver, confirmation-use log | `a686c21` |
 | F-19 random as a strength tier | **Fixed**: not a default evaluation opponent (smoke test only) | `a686c21` |
 | F-21 BC split by row | **Fixed**: datasets record `game_id`; BC validation and the RL anchor holdout hold out whole games | `a686c21` |
-| F-25 GNN rollout throughput | **Fixed**: batched multi-game rollouts + NumPy sampling + spawned GPU inference workers; GNN 256x4 ~520 -> ~3,570 transitions/s, flat model ~5,000 -> ~13,850 (see README "Rollout throughput") | roadmap Phase 4 commit |
-| Enum-keyed dicts | Identity `__hash__` on the hot enums (dict lookups 2x faster); full int-array rewrite measured not worthwhile (~3% end-to-end) | roadmap Phase 4 commit |
+| F-25 GNN rollout throughput | **Fixed**: batched multi-game rollouts + NumPy sampling + spawned GPU inference workers; GNN 256x4 ~520 -> ~3,570 transitions/s, flat model ~5,000 -> ~13,850 (see README "Rollout throughput") | `88a7f59` |
+| Enum-keyed dicts | Identity `__hash__` on the hot enums (dict lookups 2x faster); full int-array rewrite measured not worthwhile (~3% end-to-end) | `88a7f59` |
 | F-12, F-23, F-24, F-26–F-29 | Open | — |
 
 ## Executive Summary
