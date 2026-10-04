@@ -32,7 +32,7 @@ OPPONENT_FEAT_DIM = 9
 # publicly-inferable resource estimate (5) + unknown-identity card count (1).
 PUBLIC_HAND_FEAT_DIM = 6
 NUM_OPPONENTS = 3
-CONTEXT_FEAT_DIM = 25
+CONTEXT_FEAT_DIM = 40  # phase(8) dice(2) pending give/want(10) + proposer(5) | counter give/want(10) + proposer(5)
 SELF_ID_DIM = 4  # one-hot of the observing player's absolute seat (0-3)
 
 
@@ -171,6 +171,16 @@ def build_graph_observation(state: GameState, pid: int,
         context_features[20:25] = _relative_seat_onehot(state.pending_trade.proposer, pid)
     else:
         context_features[20] = 1.0
+    # live counter-offer: the proposer must see its terms to accept/reject it
+    ctr = state.trade_counter_context
+    if ctr is not None:
+        for r, amt in ctr.give.items():
+            context_features[25 + RESOURCE_INDEX[r]] = amt / 19.0
+        for r, amt in ctr.want.items():
+            context_features[30 + RESOURCE_INDEX[r]] = amt / 19.0
+        context_features[35:40] = _relative_seat_onehot(ctr.proposer, pid)
+    else:
+        context_features[35] = 1.0
 
     # Absolute seat of the observing player -- used only as a deterministic
     # index (never a learned input) to map the GNN's seat-relative opponent

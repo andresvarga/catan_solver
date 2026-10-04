@@ -264,10 +264,9 @@ class GraphActorCritic(nn.Module):
         return torch.nn.functional.mse_loss(pred, target)
 
     def value(self, obs_batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Value-only forward pass (no action sampling). Not used by the
-        training loop anymore -- truncation is treated as terminal in
-        compute_gae, so nothing bootstraps from it -- but kept as a cheap
-        utility for analysis and future centralized-critic work."""
+        """Value-only forward pass (no action sampling). Used by
+        `hier_ppo.collect_episode` to bootstrap V(s_T) when an episode is
+        truncated by the step cap (see `training/ppo.compute_gae`)."""
         features, _, _, _, _ = self.encode(obs_batch)
         return self.value_head(features).squeeze(-1)
 

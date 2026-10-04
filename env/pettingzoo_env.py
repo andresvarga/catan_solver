@@ -56,8 +56,16 @@ class CatanAECEnv(AECEnv):
     def __init__(self, randomize_board: bool = True, seed: int | None = None,
                  allow_trading: bool = True, allow_dev_cards: bool = True,
                  vp_shaping_weight: float = 0.0, max_episode_steps: int | None = None,
-                 public_hand_features: bool = False):
+                 public_hand_features: bool = False, truncation_reward: str = "zero"):
         super().__init__()
+        # What a step-cap truncation pays. "zero" (default): nobody is paid --
+        # a truncated game has no winner, and the training loop bootstraps
+        # V(s_T) instead (training/ppo.compute_gae). "rank": legacy behaviour,
+        # rank-on-current-VP rewards, which pays the VP leader exactly what a
+        # real win pays and so rewards stalling while ahead (audit F-06).
+        if truncation_reward not in ("zero", "rank"):
+            raise ValueError(f"truncation_reward must be 'zero' or 'rank', got {truncation_reward!r}")
+        self._truncation_reward = truncation_reward
         self._randomize_board = randomize_board
         self._init_seed = seed
         self._allow_trading = allow_trading
@@ -118,6 +126,12 @@ class CatanAECEnv(AECEnv):
             "pending_trade_give": spaces.Box(0, 19, (5,), dtype=np.int16),
             "pending_trade_want": spaces.Box(0, 19, (5,), dtype=np.int16),
             "pending_trade_proposer": spaces.Box(-1, NUM_PLAYERS - 1, (1,), dtype=np.int8),
+            # Live counter-offer (TRADE_RESPONSE, proposer deciding): what the
+            # counter-offerer gives / wants and who they are. Public to the
+            # whole table, and the proposer cannot evaluate ACCEPT without it.
+            "counter_trade_give": spaces.Box(0, 19, (5,), dtype=np.int16),
+            "counter_trade_want": spaces.Box(0, 19, (5,), dtype=np.int16),
+            "counter_trade_proposer": spaces.Box(-1, NUM_PLAYERS - 1, (1,), dtype=np.int8),
             "action_mask": spaces.Box(0, 1, (MAX_ACTIONS,), dtype=np.int8),
         })
 
@@ -192,7 +206,8 @@ class CatanAECEnv(AECEnv):
             self._assign_terminal_rewards()
             self.terminations = {a: True for a in self.agents}
         elif self._max_episode_steps is not None and self._step_count >= self._max_episode_steps:
-            self._assign_terminal_rewards()  # rank on current standing, not a real win
+            if self._truncation_reward == "rank":
+                self._assign_terminal_rewards()  # legacy: rank on current standing
             self.truncations = {a: True for a in self.agents}
             self._refresh_legal_cache()
         else:
@@ -219,6 +234,12 @@ class CatanAECEnv(AECEnv):
         state = self.engine.state
         vps = {pid: total_vp(state, pid) for pid in state.players}
         ranking = sorted(state.players.keys(), key=lambda pid: vps[pid], reverse=True)
+        if state.winner is not None:
+            # The winner is 1st outright even if another player is level on VP
+            # (possible: someone can sit on 10+ VP reached during another
+            # player's turn, waiting to claim it on their own turn).
+            ranking.remove(state.winner)
+            ranking.insert(0, state.winner)
         rank_reward = {0: 1.0, 1: 0.0, 2: -0.5, 3: -1.0}
 
         # Group by VP so ties split the reward mass evenly instead of
@@ -228,7 +249,7 @@ class CatanAECEnv(AECEnv):
         # real-terminal tie for 2nd/3rd/4th is still possible on a clean win.
         groups: list[list[int]] = []
         for pid in ranking:
-            if groups and vps[pid] == vps[groups[-1][0]]:
+            if groups and vps[pid] == vps[groups[-1][0]] and groups[-1][0] != state.winner:
                 groups[-1].append(pid)
             else:
                 groups.append([pid])
@@ -368,6 +389,16 @@ def build_observation(state, pid: int, legal_cache: list[Action], show_mask: boo
             pending_want[RESOURCE_INDEX[r]] = amt
         pending_proposer = state.pending_trade.proposer
 
+    counter_give = np.zeros(5, dtype=np.int16)
+    counter_want = np.zeros(5, dtype=np.int16)
+    counter_proposer = -1
+    if state.trade_counter_context is not None:
+        for r, amt in state.trade_counter_context.give.items():
+            counter_give[RESOURCE_INDEX[r]] = amt
+        for r, amt in state.trade_counter_context.want.items():
+            counter_want[RESOURCE_INDEX[r]] = amt
+        counter_proposer = state.trade_counter_context.proposer
+
     mask = np.zeros(MAX_ACTIONS, dtype=np.int8)
     if show_mask:
         mask[: len(legal_cache)] = 1
@@ -408,5 +439,8 @@ def build_observation(state, pid: int, legal_cache: list[Action], show_mask: boo
         "pending_trade_give": pending_give,
         "pending_trade_want": pending_want,
         "pending_trade_proposer": np.array([pending_proposer], dtype=np.int8),
+        "counter_trade_give": counter_give,
+        "counter_trade_want": counter_want,
+        "counter_trade_proposer": np.array([counter_proposer], dtype=np.int8),
         "action_mask": mask,
     }

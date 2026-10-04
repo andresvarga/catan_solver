@@ -23,8 +23,10 @@ Guardrails carried over from the league loop:
 - KL early stop per update (target_kl), lr well below the BC lr.
 
 Seat rotation: Catan seats are not symmetric (setup order), and the eval
-protocol rotates the model's seat by seed -- so each iteration splits its
-episode budget evenly across the 4 trainee seats.
+protocol (train_hier.evaluate_policy) rotates the model's seat by seed -- so
+each iteration splits its episode budget evenly across the 4 trainee seats.
+`best_eval.pt` is the max of many noisy in-loop reads (winner's curse): treat
+it as a candidate and confirm it on fresh seed bases before claiming a gain.
 """
 from __future__ import annotations
 
@@ -42,22 +44,25 @@ from training.hier_ppo import (
     collect_rollout_parallel, compute_holdout_nll, load_bc_anchor, ppo_update,
 )
 from training.model_adapters import ADAPTERS
+from training.run_manifest import write_manifest
 from training.ppo import GAE_LAMBDA, GAMMA
-from training.train_hier import build_model, evaluate_policy
+from training.train_hier import build_model, evaluate_policy, wilson_ci
 
 
 def fixed_seed_eval(model, games_per_set: int, num_workers: int,
                      public_hand_features: bool, seed_bases: tuple[int, int],
-                     model_type: str) -> tuple[float, float]:
+                     model_type: str) -> tuple[float, float, tuple[float, float]]:
+    """Seat-rotated (evaluate_policy rotates the trainee by seed % 4) win
+    rate, avg VP and 95% Wilson CI pooled over both seed bases."""
     wins = vp = 0.0
     for base in seed_bases:
         res = evaluate_policy(model, "heuristic", games_per_set, seed_base=base,
                                model_kind=model_type, num_workers=num_workers,
                                public_hand_features=public_hand_features)
-        wins += res["win_rate"] * games_per_set
+        wins += res["wins"]
         vp += res["avg_vp"] * games_per_set
     total = 2 * games_per_set
-    return wins / total, vp / total
+    return wins / total, vp / total, wilson_ci(int(wins), total)
 
 
 def main():
@@ -82,7 +87,11 @@ def main():
     parser.add_argument("--target-kl", type=float, default=0.02)
     parser.add_argument("--gamma", type=float, default=GAMMA)
     parser.add_argument("--gae-lambda", type=float, default=GAE_LAMBDA)
-    parser.add_argument("--max-episode-steps", type=int, default=800)
+    parser.add_argument("--max-episode-steps", type=int, default=4000,
+                         help="step cap; heuristic games take ~1,100 steps (p90 ~1,450), so a "
+                              "cap below ~2,500 truncates most games (audit F-06)")
+    parser.add_argument("--truncation-reward", choices=["zero", "rank"], default="zero",
+                         help="what a step-cap truncation pays: 'zero' (default; GAE bootstraps V(s_T)) or 'rank' (legacy rank-on-standing, pays the VP leader a full win -- audit F-06)")
     parser.add_argument("--bc-anchor-dataset", type=str, default=None)
     parser.add_argument("--bc-anchor-coef", type=float, default=0.2)
     parser.add_argument("--bc-anchor-samples", type=int, default=100_000)
@@ -94,7 +103,9 @@ def main():
                          help="rows reserved from the anchor dataset (disjoint "
                               "from the anchor subsample) for the drift monitor")
     parser.add_argument("--eval-every", type=int, default=5)
-    parser.add_argument("--eval-games", type=int, default=120, help="per seed base (two bases)")
+    parser.add_argument("--eval-games", type=int, default=120,
+                         help="per seed base (two bases); keep divisible by 4 so the seat "
+                              "rotation (seed %% 4) is balanced")
     parser.add_argument("--eval-seed-bases", type=int, nargs=2, default=[4_700_000, 4_800_000],
                          help="in-loop selection signal only -- final claims need a "
                               "fresh-seed confirmatory on never-used bases")
@@ -104,6 +115,7 @@ def main():
 
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     os.makedirs(args.out_dir, exist_ok=True)
+    write_manifest(args.out_dir, args, {"driver": "rl_finetune"})
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     adapter = ADAPTERS[args.model_type]
@@ -117,7 +129,8 @@ def main():
 
     env_kwargs = dict(randomize_board=True, allow_trading=True, allow_dev_cards=True,
                       vp_shaping_weight=0.0, max_episode_steps=args.max_episode_steps,
-                      public_hand_features=args.public_hand_features)
+                      public_hand_features=args.public_hand_features,
+                      truncation_reward=args.truncation_reward)
 
     bc_anchor = holdout = None
     if args.bc_anchor_dataset:
@@ -145,10 +158,11 @@ def main():
         print(f"bc anchor: {len(anchor_idx)} rows, holdout {len(hold_idx)} rows, "
               f"init holdout NLL={nll0:.4f}", flush=True)
 
-    win0, vp0 = fixed_seed_eval(model, args.eval_games, args.num_workers,
-                                 args.public_hand_features, tuple(args.eval_seed_bases),
-                                 args.model_type)
-    print(f"iter 0 (init): win_rate={win0:.1%} avg_vp={vp0:.2f}", flush=True)
+    win0, vp0, ci0 = fixed_seed_eval(model, args.eval_games, args.num_workers,
+                                      args.public_hand_features, tuple(args.eval_seed_bases),
+                                      args.model_type)
+    print(f"iter 0 (init): win_rate={win0:.1%} (95% CI {ci0[0]:.1%}-{ci0[1]:.1%}) avg_vp={vp0:.2f}",
+          flush=True)
     best_win = win0
     history = [(0, win0, vp0)]
 
@@ -194,9 +208,9 @@ def main():
                    os.path.join(args.out_dir, "latest.pt"))
 
         if it % args.eval_every == 0:
-            win, vp = fixed_seed_eval(model, args.eval_games, args.num_workers,
-                                       args.public_hand_features, tuple(args.eval_seed_bases),
-                                       args.model_type)
+            win, vp, ci = fixed_seed_eval(model, args.eval_games, args.num_workers,
+                                           args.public_hand_features, tuple(args.eval_seed_bases),
+                                           args.model_type)
             history.append((it, win, vp))
             marker = ""
             if win > best_win:
@@ -204,7 +218,8 @@ def main():
                 torch.save({"model": model.state_dict(), "iteration": it, "win_rate": win},
                            os.path.join(args.out_dir, "best_eval.pt"))
                 marker = "  <-- new best, saved best_eval.pt"
-            print(f"iter {it:3d}: EVAL win_rate={win:.1%} avg_vp={vp:.2f}{marker}", flush=True)
+            print(f"iter {it:3d}: EVAL win_rate={win:.1%} (95% CI {ci[0]:.1%}-{ci[1]:.1%}) "
+                  f"avg_vp={vp:.2f}{marker}", flush=True)
 
     print("\niter | win_rate | avg_vp")
     for it, win, vp in history:

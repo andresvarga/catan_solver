@@ -12,6 +12,7 @@ rather than reconstructed ad hoc.
 from __future__ import annotations
 
 import argparse
+import math
 import multiprocessing as mp
 import os
 import random
@@ -32,6 +33,7 @@ from training.hier_ppo import (
 )
 from training.model import observation_dim
 from training.model_adapters import ADAPTERS
+from training.run_manifest import write_manifest
 
 OPPONENT_FACTORIES = {"random": RandomAgent, "heuristic": HeuristicAgent}
 
@@ -68,19 +70,26 @@ def env_kwargs_from_args(args: argparse.Namespace) -> dict:
         vp_shaping_weight=args.vp_shaping_weight,
         max_episode_steps=args.max_episode_steps,
         public_hand_features=args.public_hand_features,
+        truncation_reward=getattr(args, "truncation_reward", "zero"),
     )
 
 
 def _play_eval_game(model, opponent_cls, seed: int, randomize_board: bool, allow_trading: bool,
                      allow_dev_cards: bool, max_steps: int, model_kind: str,
                      public_hand_features: bool = False) -> tuple[bool, bool, int]:
-    """Trainee (deterministic, seat 0) vs. 3 copies of `opponent_cls`. Returns (won, finished, vp)."""
+    """Trainee (deterministic) vs. 3 copies of `opponent_cls`, the trainee's
+    seat rotated by seed (`seed % 4`). Seats are not symmetric -- seat 0 wins
+    ~28% of heuristic-vs-heuristic games vs ~23-25% for the others -- so a
+    fixed seat biases the win rate (audit F-14). Use a game count divisible
+    by 4 to balance seats exactly. Returns (won, finished, vp)."""
     engine = CatanEngine(randomize_board=randomize_board, seed=seed,
                           allow_trading=allow_trading, allow_dev_cards=allow_dev_cards)
-    agents = {0: HierarchicalLearnedAgent(0, model=model, deterministic=True, model_kind=model_kind,
-                                           public_hand_features=public_hand_features)}
-    for pid in range(1, NUM_PLAYERS):
-        agents[pid] = opponent_cls(pid, random.Random(seed * 97 + pid))
+    seat = seed % NUM_PLAYERS
+    agents = {seat: HierarchicalLearnedAgent(seat, model=model, deterministic=True, model_kind=model_kind,
+                                              public_hand_features=public_hand_features)}
+    for pid in range(NUM_PLAYERS):
+        if pid != seat:
+            agents[pid] = opponent_cls(pid, random.Random(seed * 97 + pid))
     steps = 0
     while not engine.done and steps < max_steps:
         actor = engine.acting_player()
@@ -88,8 +97,19 @@ def _play_eval_game(model, opponent_cls, seed: int, randomize_board: bool, allow
         engine.step(action)
         steps += 1
     finished = engine.done
-    won = finished and engine.state.winner == 0
-    return won, finished, total_vp(engine.state, 0)
+    won = finished and engine.state.winner == seat
+    return won, finished, total_vp(engine.state, seat)
+
+
+def wilson_ci(wins: int, games: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a win rate."""
+    if games == 0:
+        return 0.0, 1.0
+    p = wins / games
+    d = 1 + z * z / games
+    c = (p + z * z / (2 * games)) / d
+    h = z * math.sqrt(p * (1 - p) / games + z * z / (4 * games * games)) / d
+    return c - h, c + h
 
 
 # -- parallel evaluation -----------------------------------------------------
@@ -154,7 +174,8 @@ def evaluate_policy(model, opponent_kind: str, games: int, seed_base: int,
         finished = sum(r[1] for r in results)
         vp_sum = sum(r[2] for r in results)
 
-    return {"win_rate": wins / games, "finish_rate": finished / games, "avg_vp": vp_sum / games}
+    return {"win_rate": wins / games, "wins": wins, "games": games, "ci95": wilson_ci(wins, games),
+            "finish_rate": finished / games, "avg_vp": vp_sum / games}
 
 
 def main():
@@ -165,7 +186,11 @@ def main():
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=512)
-    parser.add_argument("--max-episode-steps", type=int, default=600)
+    parser.add_argument("--max-episode-steps", type=int, default=4000,
+                         help="step cap; heuristic games take ~1,100 steps (p90 ~1,450), so a "
+                              "cap below ~2,500 truncates most games (audit F-06)")
+    parser.add_argument("--truncation-reward", choices=["zero", "rank"], default="zero",
+                         help="what a step-cap truncation pays: 'zero' (default; GAE bootstraps V(s_T)) or 'rank' (legacy rank-on-standing, pays the VP leader a full win -- audit F-06)")
     parser.add_argument("--vp-shaping-weight", type=float, default=0.05)
     parser.add_argument("--no-trading", action="store_true")
     parser.add_argument("--no-dev-cards", action="store_true")
@@ -215,6 +240,7 @@ def main():
     print(f"PPO update device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
+    write_manifest(args.checkpoint_dir, args, {"driver": "train_hier"})
     adapter = ADAPTERS[args.model_type]
 
     model = build_model(args.model_type, args.hidden, args.gnn_layers,
@@ -285,8 +311,10 @@ def main():
                                         model_kind=args.model_type, num_workers=args.num_workers,
                                         public_hand_features=args.public_hand_features)
                 print(f"  eval vs {opp:<10} [same-dist] win_rate={same['win_rate']:.0%} "
+                      f"(95% CI {same['ci95'][0]:.0%}-{same['ci95'][1]:.0%}) "
                       f"finish_rate={same['finish_rate']:.0%} avg_vp={same['avg_vp']:.2f}  "
                       f"[full-ruleset] win_rate={full['win_rate']:.0%} "
+                      f"(95% CI {full['ci95'][0]:.0%}-{full['ci95'][1]:.0%}) "
                       f"finish_rate={full['finish_rate']:.0%} avg_vp={full['avg_vp']:.2f}")
             ckpt_path = os.path.join(args.checkpoint_dir, f"iter_{iteration}.pt")
             torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),

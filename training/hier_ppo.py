@@ -40,11 +40,26 @@ from training.ppo import GAE_LAMBDA, GAMMA, compute_gae
 
 def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
                      opponent_agents: dict[int, object] | None = None,
-                     adapter: ModelAdapter = FLAT_ADAPTER) -> dict:
+                     adapter: ModelAdapter = FLAT_ADAPTER,
+                     skip_forced: bool = True) -> dict:
+    """Play one episode, returning each trainee seat's own transition list.
+
+    `skip_forced`: decisions with exactly one legal action (ROLL_DICE with no
+    playable dev card, a lone discard/robber option, ...) carry no policy
+    gradient but, if stored, each still costs one step of discount -- ~20% of
+    all transitions (audit F-15). With skip_forced they are played without
+    querying the model, and any reward earned across them accrues to the
+    agent's previous real decision. On truncation each trainee's last
+    transition records `bootstrap_value` = V(s_T) for compute_gae."""
     opponent_agents = opponent_agents or {}
     env.reset(seed=seed)
     pending: dict[str, dict] = {}
     episode_data: dict[str, list] = {a: [] for a in env.possible_agents}
+
+    def finalize(agent: str, terminated: bool, truncated: bool) -> None:
+        p = pending.pop(agent)
+        episode_data[agent].append({**p, "terminated": terminated, "truncated": truncated,
+                                    "done": terminated or truncated})
 
     while env.agents:
         agent = env.agent_selection
@@ -61,16 +76,16 @@ def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
         done = term or trunc
 
         if agent in pending:
-            p = pending.pop(agent)
-            # No bootstrap value on truncation: the env's rank-on-standing
-            # terminal reward already stands in for the remaining return, and
-            # compute_gae treats truncation as terminal -- see its docstring.
-            episode_data[agent].append({
-                **p, "reward": reward, "terminated": term, "truncated": trunc,
-                "done": done,
-            })
+            pending[agent]["reward"] += reward
 
         if done:
+            if agent in pending:
+                if trunc and not term:
+                    encoded = adapter.encode(env, obs, pid)
+                    with torch.inference_mode():
+                        pending[agent]["bootstrap_value"] = float(
+                            model.value(adapter.to_single(encoded, device)).reshape(-1)[0])
+                finalize(agent, term, trunc)
             action_idx = None
         elif pid in opponent_agents:
             # Pass the env's cached legal-action list through so the agent
@@ -81,12 +96,18 @@ def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
             action_idx = legal.index(concrete_action)
         else:
             legal = env.legal_actions()
-            encoded = adapter.encode(env, obs, pid)
-            obs_t = adapter.to_single(encoded, device)
-            with torch.inference_mode():
-                concrete_action, logprob, value, head_data = model.act(obs_t, legal, deterministic=False)
-            action_idx = legal.index(concrete_action)
-            pending[agent] = {"obs": encoded, "logprob": logprob, "value": value, **head_data}
+            if skip_forced and len(legal) == 1:
+                action_idx = 0  # forced move: no transition, reward accrues to the pending one
+            else:
+                if agent in pending:
+                    finalize(agent, False, False)
+                encoded = adapter.encode(env, obs, pid)
+                obs_t = adapter.to_single(encoded, device)
+                with torch.inference_mode():
+                    concrete_action, logprob, value, head_data = model.act(obs_t, legal, deterministic=False)
+                action_idx = legal.index(concrete_action)
+                pending[agent] = {"obs": encoded, "logprob": logprob, "value": value,
+                                  "reward": 0.0, **head_data}
         env.step(action_idx)
 
     return episode_data

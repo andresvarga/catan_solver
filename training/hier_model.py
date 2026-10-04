@@ -329,10 +329,9 @@ class HierarchicalActorCritic(nn.Module):
         return self.trunk(obs_batch)
 
     def value(self, obs_batch: torch.Tensor) -> torch.Tensor:
-        """Value-only forward pass (no action sampling). Not used by the
-        training loop anymore -- truncation is treated as terminal in
-        compute_gae, so nothing bootstraps from it -- but kept as a cheap
-        utility for analysis and future centralized-critic work."""
+        """Value-only forward pass (no action sampling). Used by
+        `hier_ppo.collect_episode` to bootstrap V(s_T) when an episode is
+        truncated by the step cap (see `training/ppo.compute_gae`)."""
         feats = self.features(obs_batch)
         return self.value_head(feats).squeeze(-1)
 

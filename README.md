@@ -181,7 +181,6 @@ system is broken.
 
 ## Known simplifications (documented in code, worth revisiting later)
 
-- Dev cards may only be played during ROLL/MAIN phases (not before rolling).
 - `legal_actions()` caps DISCARD combinations at 100 and PROPOSE_TRADE/
   MARITIME_TRADE to simple single-resource-for-single-resource bundles —
   a reference enumeration for testing and random play; `HierarchicalActorCritic`

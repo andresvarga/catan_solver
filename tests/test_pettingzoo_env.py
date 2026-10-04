@@ -185,3 +185,33 @@ def test_vp_shaping_rewards_are_nonzero_when_enabled():
         if i > 600:
             break
     assert saw_nonzero
+
+
+def test_counter_offer_is_observable_to_proposer():
+    """The proposer decides ACCEPT/REJECT on a counter-offer, so its terms and
+    author must be in the observation (audit F-04), in both encoders."""
+    import random as _random
+    from env.actions import Action, ActionType
+    from env.board import Resource
+    from env.engine import CatanEngine, legal_actions, step
+    from training.graph_features import build_graph_observation
+    from env.pettingzoo_env import build_observation
+
+    eng = CatanEngine(seed=3)
+    rng = _random.Random(3)
+    while eng.state.phase != Phase.MAIN:
+        eng.step(rng.choice(eng.legal_actions()))
+    s = eng.state
+    p0 = s.current_player
+    s.players[p0].resources[Resource.WOOD] += 1
+    responder = (p0 + 1) % 4
+    s.players[responder].resources[Resource.ORE] += 1
+    step(s, next(a for a in legal_actions(s) if a.type == ActionType.PROPOSE_TRADE
+                 and Resource.WOOD in a.params["give"]))
+    step(s, Action(ActionType.COUNTER_TRADE, {"give": {Resource.ORE: 1}, "want": {Resource.WOOD: 1}}))
+    obs = build_observation(s, p0, legal_actions(s), True)
+    assert obs["counter_trade_give"].tolist() == [0, 0, 0, 0, 1]
+    assert obs["counter_trade_want"].tolist() == [1, 0, 0, 0, 0]
+    assert int(obs["counter_trade_proposer"][0]) == responder
+    ctx = build_graph_observation(s, p0)["context"]
+    assert ctx[25 + 4] > 0 and ctx[30 + 0] > 0 and ctx[35 + 2] == 1.0  # responder = next seat

@@ -4,8 +4,9 @@ Operates on a plain `GameState` (env/state.py) via `legal_actions(state)` and
 `step(state, action)`. No RL-specific concepts (observations, rewards, agent
 loop) live here -- that's the PettingZoo wrapper's job. Simplifications/rule
 variants worth flagging explicitly:
-- dev cards may only be played during ROLL/MAIN (not before rolling), a
-  simplification standard in other digital implementations.
+- dev cards may be played before rolling (ROLL phase) or after (MAIN), as
+  in the official rules; Road Building's roads are placed immediately, and
+  any that cannot be placed are forfeited.
 - domestic-trade bundle enumeration in `legal_actions` is capped to keep the
   reference action list finite -- `step` itself accepts any give/want dict.
 - PROPOSE_TRADE is capped at `MAX_TRADE_PROPOSALS_PER_TURN` (state.py) per
@@ -296,11 +297,15 @@ def total_vp(state: GameState, player_id: int) -> int:
 
 
 def check_win(state: GameState) -> None:
-    for pid in state.players:
-        if total_vp(state, pid) >= WINNING_VP:
-            state.winner = pid
-            state.phase = Phase.GAME_OVER
-            return
+    """Official rule: you can only win during your own turn. Only the turn
+    owner is checked here; a player who reaches 10 VP during someone else's
+    turn (e.g. by inheriting Longest Road when a third player's settlement
+    breaks the holder's road) claims the win at the start of their own next
+    turn -- END_TURN calls this again for the incoming player."""
+    pid = state.current_player
+    if total_vp(state, pid) >= WINNING_VP:
+        state.winner = pid
+        state.phase = Phase.GAME_OVER
 
 
 # --------------------------------------------------------------------------
@@ -408,7 +413,13 @@ def legal_actions(state: GameState) -> list[Action]:
         return actions
 
     if state.phase == Phase.ROLL:
-        return [Action(ActionType.ROLL_DICE)]
+        # Official rule: development cards may be played at any time during
+        # your turn, "even before you roll the dice" (e.g. a knight to move
+        # the robber off your own hex before production). ROLL_DICE stays
+        # first so simple agents that take actions[0] in ROLL keep rolling.
+        if state.free_roads_remaining > 0:  # pre-roll Road Building in progress
+            return _free_road_actions(state, actor)
+        return [Action(ActionType.ROLL_DICE)] + _dev_card_play_actions(state, actor)
 
     if state.phase == Phase.DISCARD:
         amount = state.discard_amounts[actor]
@@ -459,9 +470,10 @@ def legal_actions(state: GameState) -> list[Action]:
 
     if state.phase == Phase.MAIN:
         if state.free_roads_remaining > 0:
-            for eid in state.board.edges:
-                if can_build_road(state, actor, eid):
-                    actions.append(Action(ActionType.BUILD_ROAD, {"edge_id": eid, "free": True}))
+            # Road Building's roads are placed immediately; step() clears
+            # free_roads_remaining as soon as no placement is possible, so
+            # this list is never empty and the turn can't lock.
+            return _free_road_actions(state, actor)
         else:
             if has_resources(hand, BUILDING_COSTS["road"]):
                 for eid in state.board.edges:
@@ -497,32 +509,56 @@ def legal_actions(state: GameState) -> list[Action]:
                                                            {"give": {give_r: 1}, "want": {want_r: 1},
                                                             "targets": others}))
 
-        if state.allow_dev_cards and not player.played_dev_card_this_turn:
-            avail = lambda c: player.dev_cards.get(c, 0) - player.dev_cards_bought_this_turn.get(c, 0)
-            if avail(DevCard.KNIGHT) > 0:
-                for hx in state.board.hexes.values():
-                    if hx.id == state.board.robber_hex:
-                        continue
-                    victims = eligible_robber_victims(state, hx.id, actor)
-                    if victims:
-                        for v in victims:
-                            actions.append(Action(ActionType.PLAY_KNIGHT, {"hex_id": hx.id, "victim": v}))
-                    else:
-                        actions.append(Action(ActionType.PLAY_KNIGHT, {"hex_id": hx.id, "victim": None}))
-            if avail(DevCard.ROAD_BUILDING) > 0 and state.free_roads_remaining == 0:
-                actions.append(Action(ActionType.PLAY_ROAD_BUILDING))
-            if avail(DevCard.YEAR_OF_PLENTY) > 0:
-                for combo in combinations_with_replacement(list(Resource), 2):
-                    needed = Counter(combo)
-                    if all(state.bank[r] >= n for r, n in needed.items()):
-                        actions.append(Action(ActionType.PLAY_YEAR_OF_PLENTY, {"resources": list(combo)}))
-            if avail(DevCard.MONOPOLY) > 0:
-                for r in Resource:
-                    actions.append(Action(ActionType.PLAY_MONOPOLY, {"resource": r}))
-
+        actions.extend(_dev_card_play_actions(state, actor))
         actions.append(Action(ActionType.END_TURN))
 
     return actions
+
+
+def _free_road_actions(state: GameState, actor: int) -> list[Action]:
+    return [Action(ActionType.BUILD_ROAD, {"edge_id": eid, "free": True})
+            for eid in state.board.edges if can_build_road(state, actor, eid)]
+
+
+def _dev_card_play_actions(state: GameState, actor: int) -> list[Action]:
+    """Playable development cards for the turn owner (ROLL or MAIN phase):
+    at most one per turn, never one bought this turn, VP cards never
+    'played' (they count automatically)."""
+    actions: list[Action] = []
+    player = state.players[actor]
+    if not state.allow_dev_cards or player.played_dev_card_this_turn:
+        return actions
+    avail = lambda c: player.dev_cards.get(c, 0) - player.dev_cards_bought_this_turn.get(c, 0)
+    if avail(DevCard.KNIGHT) > 0:
+        for hx in state.board.hexes.values():
+            if hx.id == state.board.robber_hex:
+                continue
+            victims = eligible_robber_victims(state, hx.id, actor)
+            if victims:
+                for v in victims:
+                    actions.append(Action(ActionType.PLAY_KNIGHT, {"hex_id": hx.id, "victim": v}))
+            else:
+                actions.append(Action(ActionType.PLAY_KNIGHT, {"hex_id": hx.id, "victim": None}))
+    if avail(DevCard.ROAD_BUILDING) > 0 and state.free_roads_remaining == 0:
+        actions.append(Action(ActionType.PLAY_ROAD_BUILDING))
+    if avail(DevCard.YEAR_OF_PLENTY) > 0:
+        for combo in combinations_with_replacement(list(Resource), 2):
+            needed = Counter(combo)
+            if all(state.bank[r] >= n for r, n in needed.items()):
+                actions.append(Action(ActionType.PLAY_YEAR_OF_PLENTY, {"resources": list(combo)}))
+    if avail(DevCard.MONOPOLY) > 0:
+        for r in Resource:
+            actions.append(Action(ActionType.PLAY_MONOPOLY, {"resource": r}))
+    return actions
+
+
+def _settle_free_roads(state: GameState, actor: int) -> None:
+    """Forfeit any remaining Road Building roads that can no longer be placed
+    (no road pieces left, or no legal edge) -- otherwise the turn would be
+    stuck offering only END_TURN (MAIN) or nothing at all (ROLL)."""
+    if state.free_roads_remaining > 0 and not any(
+            can_build_road(state, actor, eid) for eid in state.board.edges):
+        state.free_roads_remaining = 0
 
 
 # --------------------------------------------------------------------------
@@ -642,7 +678,8 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
 
     if t == ActionType.BUILD_ROAD:
         eid = p["edge_id"]
-        if state.free_roads_remaining > 0:
+        free = state.free_roads_remaining > 0
+        if free:
             state.free_roads_remaining -= 1
         else:
             pay(state, actor, BUILDING_COSTS["road"])
@@ -653,6 +690,8 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
         # anyone else's, since severing requires a new blocking vertex, which
         # only a settlement/city places. Safe to recompute just this player.
         recompute_longest_road(state, players=[actor])
+        if free:
+            _settle_free_roads(state, actor)
         check_win(state)
         return
 
@@ -696,6 +735,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
         player.dev_cards[DevCard.ROAD_BUILDING] -= 1
         player.played_dev_card_this_turn = True
         state.free_roads_remaining = 2
+        _settle_free_roads(state, actor)
         return
 
     if t == ActionType.PLAY_YEAR_OF_PLENTY:
@@ -818,6 +858,9 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
         state.current_player = (actor + 1) % NUM_PLAYERS
         state.turn_number += 1
         state.phase = Phase.ROLL
+        # a player who reached 10 VP during another player's turn claims the
+        # win now, at the start of their own turn (see check_win)
+        check_win(state)
         return
 
     raise ValueError(f"Unhandled action type {t}")

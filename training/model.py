@@ -49,6 +49,9 @@ def flatten_observation(obs: dict) -> np.ndarray:
         obs["pending_trade_give"].astype(np.float32) / 19.0,
         obs["pending_trade_want"].astype(np.float32) / 19.0,
         _onehot(int(obs["pending_trade_proposer"][0]) + 1, NUM_PLAYERS + 1),
+        obs["counter_trade_give"].astype(np.float32) / 19.0,
+        obs["counter_trade_want"].astype(np.float32) / 19.0,
+        _onehot(int(obs["counter_trade_proposer"][0]) + 1, NUM_PLAYERS + 1),
     ]
     # Optional card-counting features (env's `public_hand_features` flag):
     # keyed on presence so the same encoder serves both observation layouts.

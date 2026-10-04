@@ -5,28 +5,69 @@ from training.model import flatten_observation, observation_dim
 from training.ppo import compute_gae
 
 
-def test_gae_treats_truncation_as_terminal_no_double_count():
-    """The env pays rank-on-standing terminal rewards when an episode
-    truncates, so GAE must NOT also bootstrap a value estimate past the
-    boundary -- that summed two estimates of the same future outcome into
-    one target. Truncated and terminated endings must produce identical
-    targets given identical rewards/values."""
-    def episode(terminated, truncated):
-        return [
-            {"value": 0.5, "reward": 0.0, "done": False, "terminated": False, "truncated": False},
-            {"value": 0.7, "reward": 1.0, "done": True, "terminated": terminated, "truncated": truncated},
-        ]
+def test_gae_bootstraps_truncation_but_not_termination():
+    """Truncation (step cap) pays no reward and is not the end of the game, so
+    its final transition bootstraps from V(s_T) (`bootstrap_value`); a real
+    termination is absorbing. (Replaces the old rank-on-standing scheme,
+    which paid a VP leader the full win reward on truncation -- audit F-06.)"""
+    def episode(terminated, truncated, reward, boot=None):
+        last = {"value": 0.7, "reward": reward, "done": True,
+                "terminated": terminated, "truncated": truncated}
+        if boot is not None:
+            last["bootstrap_value"] = boot
+        return [{"value": 0.5, "reward": 0.0, "done": False, "terminated": False, "truncated": False},
+                last]
 
-    trunc = compute_gae(episode(False, True), gamma=0.99, lam=0.95)
-    term = compute_gae(episode(True, False), gamma=0.99, lam=0.95)
+    term = compute_gae(episode(True, False, 1.0, boot=0.9), gamma=0.99, lam=0.95)
+    assert abs(term[-1]["advantage"] - (1.0 - 0.7)) < 1e-9  # bootstrap ignored on termination
+    assert abs(term[-1]["return"] - 1.0) < 1e-9
 
-    # Last transition's target is exactly reward - value: nothing beyond the
-    # episode boundary leaks in.
-    assert abs(trunc[-1]["advantage"] - (1.0 - 0.7)) < 1e-9
-    assert abs(trunc[-1]["return"] - 1.0) < 1e-9
-    for a, b in zip(trunc, term):
-        assert abs(a["advantage"] - b["advantage"]) < 1e-9
-        assert abs(a["return"] - b["return"]) < 1e-9
+    trunc = compute_gae(episode(False, True, 0.0, boot=0.9), gamma=0.99, lam=0.95)
+    assert abs(trunc[-1]["advantage"] - (0.99 * 0.9 - 0.7)) < 1e-9
+    assert abs(trunc[-1]["return"] - 0.99 * 0.9) < 1e-9
+    # earlier step: delta0 + gamma*lam*A1
+    d0 = 0.0 + 0.99 * 0.7 - 0.5
+    assert abs(trunc[0]["advantage"] - (d0 + 0.99 * 0.95 * trunc[-1]["advantage"])) < 1e-9
+
+    no_boot = compute_gae(episode(False, True, 0.0), gamma=0.99, lam=0.95)
+    assert abs(no_boot[-1]["advantage"] - (0.0 - 0.7)) < 1e-9
+
+
+def test_default_discount_keeps_credit_for_opening_decisions():
+    """~180-230 real decisions per player per game: gamma must leave most of
+    the terminal reward visible to the setup placements (audit F-15)."""
+    from training.ppo import GAMMA
+    assert GAMMA ** 230 > 0.75
+
+
+def test_collect_episode_skips_forced_moves_and_bootstraps_truncation():
+    import torch
+    from training.hier_model import HierarchicalActorCritic
+    from training.hier_ppo import collect_episode
+
+    torch.manual_seed(0)
+    model = HierarchicalActorCritic(obs_dim=observation_dim(), hidden=32).eval()
+    for max_steps in (300, None):
+        env = CatanAECEnv(seed=11, max_episode_steps=max_steps, allow_trading=False)
+        data = collect_episode(env, model, "cpu", 11)
+        rewards_seen = {a: 0.0 for a in env.possible_agents}
+        for agent, trs in data.items():
+            assert trs and trs[-1]["done"] and not any(t["done"] for t in trs[:-1])
+            for t in trs:
+                # every stored decision had a real choice somewhere in its heads
+                choices = (t["type_mask"].sum() > 1
+                           or (t["stage1_head"] is not None and t["sub_mask_1"].sum() > 1)
+                           or (t["stage2_head"] is not None and t["sub_mask_2"].sum() > 1))
+                assert choices
+                rewards_seen[agent] += t["reward"]
+            if max_steps is not None:
+                assert trs[-1]["truncated"] and "bootstrap_value" in trs[-1]
+            else:
+                assert trs[-1]["terminated"] and "bootstrap_value" not in trs[-1]
+        if max_steps is None:  # forced-move rewards are folded in, not dropped
+            assert abs(sum(rewards_seen.values()) - (-0.5)) < 1e-6
+        else:
+            assert all(v == 0.0 for v in rewards_seen.values())
 
 
 def test_flatten_observation_matches_observation_dim():
@@ -38,3 +79,38 @@ def test_flatten_observation_matches_observation_dim():
     assert flat.shape == (dim,)
     assert flat.dtype == np.float32
     assert np.isfinite(flat).all()
+
+
+def test_evaluate_policy_rotates_trainee_seat(monkeypatch):
+    """Seat 0 is the strongest seat, so evaluation must rotate the trainee's
+    seat (seed % 4) instead of always seating it first (audit F-14)."""
+    import training.train_hier as th
+    from agents.random_agent import RandomAgent
+
+    seats = []
+
+    class RecordingAgent(RandomAgent):
+        def __init__(self, player_id, model=None, **kwargs):
+            super().__init__(player_id)
+            seats.append(player_id)
+
+    monkeypatch.setattr(th, "HierarchicalLearnedAgent", RecordingAgent)
+    res = th.evaluate_policy(model=None, opponent_kind="random", games=8, seed_base=40,
+                             allow_trading=False, max_steps=300)
+    assert sorted(seats) == [0, 0, 1, 1, 2, 2, 3, 3]
+    lo, hi = res["ci95"]
+    assert 0.0 <= lo <= res["win_rate"] <= hi <= 1.0 and res["games"] == 8
+
+
+def test_write_manifest_records_run_and_keeps_history(tmp_path):
+    import argparse
+    import json
+    from training.run_manifest import write_manifest
+
+    args = argparse.Namespace(seed=3, lr=1e-4)
+    p = write_manifest(str(tmp_path), args, {"driver": "test"})
+    m = json.load(open(p))
+    assert m["args"] == {"seed": 3, "lr": 1e-4} and m["driver"] == "test"
+    assert m["git_commit"] and "git_dirty_files" in m and m["torch"]
+    write_manifest(str(tmp_path), args)
+    assert (tmp_path / "manifest.1.json").exists()

@@ -47,6 +47,7 @@ from training.hier_ppo import (
 from training.league import League
 from training.model import observation_dim
 from training.model_adapters import ADAPTERS
+from training.run_manifest import write_manifest
 from training.train_hier import build_model, evaluate_policy, move_optimizer_state
 
 MAX_EVAL_STEPS = 4000
@@ -90,6 +91,7 @@ def env_kwargs_from_args(args: argparse.Namespace) -> dict:
         vp_shaping_weight=args.vp_shaping_weight,
         max_episode_steps=args.max_episode_steps,
         public_hand_features=args.public_hand_features,
+        truncation_reward=getattr(args, "truncation_reward", "zero"),
     )
 
 
@@ -326,7 +328,11 @@ def main():
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=512)
-    parser.add_argument("--max-episode-steps", type=int, default=800)
+    parser.add_argument("--max-episode-steps", type=int, default=4000,
+                         help="step cap; heuristic games take ~1,100 steps (p90 ~1,450), so a "
+                              "cap below ~2,500 truncates most games (audit F-06)")
+    parser.add_argument("--truncation-reward", choices=["zero", "rank"], default="zero",
+                         help="what a step-cap truncation pays: 'zero' (default; GAE bootstraps V(s_T)) or 'rank' (legacy rank-on-standing, pays the VP leader a full win -- audit F-06)")
     parser.add_argument("--vp-shaping-weight", type=float, default=0.05)
     parser.add_argument("--no-trading", action="store_true")
     parser.add_argument("--no-dev-cards", action="store_true")
@@ -445,6 +451,7 @@ def main():
     print(f"PPO update device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
+    write_manifest(args.checkpoint_dir, args, {"driver": "league_train"})
     league = League.load(args.checkpoint_dir)
     adapter = ADAPTERS[args.model_type]
 
