@@ -185,11 +185,41 @@ Every confirmed bug has a strict-xfail test that reproduces it and will flip whe
 </tr>
 <tr>
 <td><a class="fref" href="#f-05">F-05</a> no step validation</td>
-<td><strong>Partly fixed</strong>: <code>CatanEngine.step</code> and <code>CatanAECEnv.step</code> validate; raw <code>engine.step</code> stays unchecked for simulation speed</td>
+<td><strong>Fixed for agent/training paths</strong>: <code>CatanEngine.step</code> and <code>CatanAECEnv.step</code> validate; raw <code>engine.step</code> stays unchecked by design (search simulations)</td>
 <td><code>cfe8b96</code></td>
 </tr>
 <tr>
-<td><a class="fref" href="#f-01">F-01</a>, <a class="fref" href="#f-02">F-02</a>, <a class="fref" href="#f-10">F-10</a>, <a class="fref" href="#f-11">F-11</a>, <a class="fref" href="#f-12">F-12</a>, <a class="fref" href="#f-16">F-16</a>, <a class="fref" href="#f-17">F-17</a>, <a class="fref" href="#f-19">F-19</a>, <a class="fref" href="#f-21">F-21</a>–<a class="fref" href="#f-29">F-29</a></td>
+<td><a class="fref" href="#f-22">F-22</a> parallel rollouts not reproducible</td>
+<td><strong>Fixed</strong>: per-episode seeding + seed-ordered reassembly; same-seed parallel runs give bit-identical weights</td>
+<td>roadmap Phase 1 commit</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-01">F-01</a> setup grants minted</td>
+<td><strong>Fixed</strong>: grants debit the bank; strict 95-card conservation holds in 1,200 fuzzed games</td>
+<td>roadmap Phase 1 commit</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-02">F-02</a> maritime ignores bank stock</td>
+<td><strong>Fixed</strong></td>
+<td>roadmap Phase 1 commit</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-11">F-11</a> shortage exception</td>
+<td><strong>Fixed</strong> (single owed player takes the remainder)</td>
+<td>roadmap Phase 1 commit</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-10">F-10</a> adjacent 6/8</td>
+<td><strong>Fixed</strong> for random and fixed boards (tokens re-dealt with the board's seeded rng)</td>
+<td>roadmap Phase 1 commit</td>
+</tr>
+<tr>
+<td>Audit tests in default run</td>
+<td><strong>Done</strong>: <code>pytest.ini</code> runs <code>tests/</code> + <code>audit/tests/</code>; <code>pytest -m slow</code> runs the 1,200-game invariant fuzz</td>
+<td>roadmap Phase 1 commit</td>
+</tr>
+<tr>
+<td><a class="fref" href="#f-12">F-12</a>, <a class="fref" href="#f-16">F-16</a>, <a class="fref" href="#f-17">F-17</a>, <a class="fref" href="#f-19">F-19</a>, <a class="fref" href="#f-21">F-21</a>, <a class="fref" href="#f-23">F-23</a>–<a class="fref" href="#f-29">F-29</a></td>
 <td>Open</td>
 <td>—</td>
 </tr>

@@ -55,9 +55,6 @@ def test_terminal_rewards_delivered_to_every_agent(seed):
     assert sum(rew.values()) == pytest.approx(-0.5)  # 1 + 0 - 0.5 - 1, ties preserve the sum
 
 
-@pytest.mark.xfail(strict=True, reason="F-01: setup grants mint cards, so a hand can exceed 19 of a "
-                                         "resource and own_resources leaves its declared Box(0, 19) "
-                                         "(seed 13300027, step 755: 20 wood)")
 def test_observations_within_declared_space():
     bad = {}
     for seed in range(13_300_000, 13_300_030):

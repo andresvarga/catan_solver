@@ -129,17 +129,31 @@ def test_dice_production_skips_robbed_hex():
 
 
 def test_bank_shortage_rule_blocks_everyone():
+    """Official rule: if the supply can't cover everyone's production of a
+    resource, nobody receives it -- unless only one player is owed it, in
+    which case that player takes what remains."""
+    from env.board import HEX_TO_RESOURCE
+    # one owed player: gets the remainder
     state = new_game(seed=7)
     hx = next(h for h in state.board.hexes.values() if h.number == 5)
-    from env.board import HEX_TO_RESOURCE
+    others = [h for h in state.board.hexes.values() if h.number == 5 and h.id != hx.id]
     resource = HEX_TO_RESOURCE[hx.terrain]
     state.bank[resource] = 1
     state.players[0].cities.append(hx.vertex_ids[0])  # wants 2
     state.vertex_owner[hx.vertex_ids[0]] = (0, "city")
-    before_bank = state.bank[resource]
     distribute_resources(state, 5)
-    assert state.bank[resource] == before_bank  # nobody got any
-    assert state.players[0].resources[resource] == 0
+    assert state.players[0].resources[resource] == 1 and state.bank[resource] == 0
+
+    # two owed players: nobody gets any
+    state = new_game(seed=7)
+    state.bank[resource] = 2
+    state.players[0].cities.append(hx.vertex_ids[0])       # wants 2
+    state.vertex_owner[hx.vertex_ids[0]] = (0, "city")
+    state.players[1].settlements.append(hx.vertex_ids[3])  # wants 1
+    state.vertex_owner[hx.vertex_ids[3]] = (1, "settlement")
+    distribute_resources(state, 5)
+    assert state.bank[resource] == 2
+    assert state.players[0].resources[resource] == 0 and state.players[1].resources[resource] == 0
 
 
 def test_move_robber_steals_from_victim():

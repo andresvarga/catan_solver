@@ -111,7 +111,7 @@ Python/env overhead anyway (GPU wouldn't help there).
 ## Running things
 
 ```
-python3 -m pytest tests/ -q
+python3 -m pytest -q            # tests/ + audit/tests (add -m slow for the fuzz run)
 python3 -m scripts.smoke_test --games 200
 python3 -m scripts.evaluate --seats heuristic,random,random,random --games 150
 

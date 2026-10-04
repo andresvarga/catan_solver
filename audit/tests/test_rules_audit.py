@@ -47,16 +47,15 @@ def test_board_composition(seed):
     assert kinds == {"generic": 8, "wood": 2, "brick": 2, "sheep": 2, "wheat": 2, "ore": 2}
 
 
-@pytest.mark.xfail(strict=True, reason="F-10: random boards place 6/8 tokens on adjacent hexes "
-                                         "(~87% of boards); official random set-up forbids it")
 def test_board_red_numbers_not_adjacent():
-    bad = 0
-    for seed in range(10_000_000, 10_000_100):
-        b = generate_board(randomize=True, seed=seed)
+    """F-10 regression: no 6/8 tokens on edge-sharing hexes (geometric check,
+    independent of board.py's axial adjacency), random and fixed boards."""
+    boards = [generate_board(randomize=True, seed=sd) for sd in range(10_000_000, 10_001_000)]
+    boards.append(generate_board(randomize=False))
+    for b in boards:
         hv = {h.id: set(h.vertex_ids) for h in b.hexes.values()}
         red = [h.id for h in b.hexes.values() if h.number in (6, 8)]
-        bad += any(len(hv[a] & hv[c]) >= 2 for i, a in enumerate(red) for c in red[i + 1:])
-    assert bad == 0
+        assert not any(len(hv[a] & hv[c]) >= 2 for i, a in enumerate(red) for c in red[i + 1:])
 
 
 # ------------------------------------------------------------------ setup
@@ -87,8 +86,6 @@ def test_setup_snake_order_and_start():
         assert total_vp(eng.state, pid) == 2
 
 
-@pytest.mark.xfail(strict=True, reason="F-01: setup starting resources are created from nothing "
-                                         "(bank not debited) -> 95-card conservation broken")
 def test_setup_grant_debits_bank():
     eng = CatanEngine(seed=10_000_002)
     rng = random.Random(2)
@@ -186,8 +183,6 @@ def test_production_settlement_city_robber():
         v in s2.vertex_owner for h in other for v in h.vertex_ids)
 
 
-@pytest.mark.xfail(strict=True, reason="F-11: bank-shortage rule lacks the official single-player "
-                                         "exception (that player should get what remains)")
 def test_bank_shortage_single_player_gets_remainder():
     s, hx = _producing_setup()
     r = Resource(hx.terrain.value)
@@ -404,8 +399,6 @@ def test_maritime_ratios_by_port():
     assert s.players[0].resources[B] == 0 and s.players[0].resources[O] == 1
 
 
-@pytest.mark.xfail(strict=True, reason="F-02: maritime trade is legal when the bank has none of the "
-                                         "requested resource -> bank goes negative, card created")
 def test_maritime_trade_requires_bank_stock():
     s = fresh_main_state(10_000_022)
     give(s, 0, wood=4)
@@ -564,14 +557,24 @@ def test_cannot_win_on_another_players_turn():
 
 
 # ------------------------------------------------------------------ adversarial engine API
-@pytest.mark.xfail(strict=True, reason="F-05: engine.step() performs no legality validation -- an "
-                                         "illegal Action silently mutates state (negative hands etc.)")
 def test_engine_step_rejects_illegal_action():
-    s = fresh_main_state(10_000_060)
+    """F-05 regression: the validated entry points agents and training use
+    (CatanEngine.step, CatanAECEnv.step) reject illegal actions before
+    mutating anything. The raw functional `engine.step` stays unchecked by
+    design (hot simulation loops in the search agents feed it only legal
+    actions)."""
+    eng = CatanEngine(seed=10_000_060)
+    s = eng.state
+    s.phase = Phase.MAIN
+    s.turn_number = 1
     place_settlement(s, 0, 0)
     before = state_signature(s)
-    with pytest.raises(Exception):
-        step(s, Action(ActionType.BUILD_CITY, {"vertex_id": 0}))  # no resources
+    for bad in (Action(ActionType.BUILD_CITY, {"vertex_id": 0}),        # no resources
+                Action(ActionType.BUILD_SETTLEMENT, {"vertex_id": 0}),  # occupied
+                Action(ActionType.ROLL_DICE),                           # wrong phase
+                Action(ActionType.MOVE_ROBBER, {"hex_id": 0, "victim": None})):
+        with pytest.raises(ValueError):
+            eng.step(bad)
     assert state_signature(s) == before
 
 

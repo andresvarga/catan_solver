@@ -42,7 +42,25 @@ def collect_episode(env: CatanAECEnv, model, device: str, seed: int,
                      opponent_agents: dict[int, object] | None = None,
                      adapter: ModelAdapter = FLAT_ADAPTER,
                      skip_forced: bool = True) -> dict:
-    """Play one episode, returning each trainee seat's own transition list.
+    """Play one episode, seeding policy sampling (torch) and every opponent's
+    `rng` from `seed`, so the episode is a pure function of (weights, seed) no
+    matter which worker process plays it or in what order -- parallel and
+    sequential rollouts give identical data (audit F-22). The caller's global
+    torch RNG state is restored afterwards."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        for seat, agent in (opponent_agents or {}).items():
+            rng = getattr(agent, "rng", None)
+            if rng is not None:
+                rng.seed(seed * 1_000_003 + seat)
+        return _collect_episode(env, model, device, seed, opponent_agents, adapter, skip_forced)
+
+
+def _collect_episode(env: CatanAECEnv, model, device: str, seed: int,
+                     opponent_agents: dict[int, object] | None,
+                     adapter: ModelAdapter, skip_forced: bool) -> dict:
+    """Episode body (see collect_episode). Returns each trainee seat's own
+    transition list.
 
     `skip_forced`: decisions with exactly one legal action (ROLL_DICE with no
     playable dev card, a lone discard/robber option, ...) carry no policy
@@ -188,7 +206,9 @@ _worker_lam: float = GAE_LAMBDA
 
 
 def reseed_forked_worker(opponent_agents: dict[int, object] | None = None) -> None:
-    """Give this forked worker its own RNG streams. fork copies the parent's
+    """Give this forked worker its own RNG streams for anything NOT covered by
+    collect_episode's per-episode seeding (e.g. ad-hoc sampling in eval
+    helpers). Rollout data itself no longer depends on this. fork copies the parent's
     torch RNG state byte-for-byte, so without this every worker's
     `dist.sample()`/`multinomial` stream is identical -- correlated
     exploration noise across supposedly independent workers. Same story for
@@ -223,18 +243,22 @@ def _init_worker(model, env_kwargs: dict, opponent_agents: dict[int, object] | N
     _worker_lam = lam
 
 
-def _worker_collect(seeds: list[int]) -> tuple[list[dict], list[dict]]:
+def _worker_collect(seeds: list[int]) -> list[tuple[int, list[dict], dict]]:
+    """Per-episode (seed, transitions, summary) so the parent can reassemble
+    results in seed order, independent of how seeds were split across
+    workers."""
     env = CatanAECEnv(**_worker_env_kwargs)
-    transitions: list[dict] = []
-    summaries: list[dict] = []
+    out = []
     for seed in seeds:
         episode_data = collect_episode(env, _worker_model, "cpu", seed,
                                         opponent_agents=_worker_opponent_agents, adapter=_worker_adapter)
+        transitions: list[dict] = []
         for agent, trs in episode_data.items():
             if trs:
                 transitions.extend(compute_gae(trs, gamma=_worker_gamma, lam=_worker_lam))
-        summaries.append(_episode_summary(env, seed, _worker_opponent_agents, _worker_opponent_name))
-    return transitions, summaries
+        out.append((seed, transitions,
+                    _episode_summary(env, seed, _worker_opponent_agents, _worker_opponent_name)))
+    return out
 
 
 def collect_rollout_parallel(env_kwargs: dict, model,
@@ -253,11 +277,14 @@ def collect_rollout_parallel(env_kwargs: dict, model,
                   initargs=(model, env_kwargs, opponent_agents, opponent_name, adapter, gamma, lam)) as pool:
         results = pool.map(_worker_collect, chunks)
 
+    # Seed order == the order sequential collect_rollout produces, so the
+    # PPO update sees identical data either way (audit F-22).
+    episodes = sorted((ep for chunk in results for ep in chunk), key=lambda ep: ep[0])
     all_transitions: list[dict] = []
     all_summaries: list[dict] = []
-    for transitions, summaries in results:
+    for _, transitions, summary in episodes:
         all_transitions.extend(transitions)
-        all_summaries.extend(summaries)
+        all_summaries.append(summary)
     return all_transitions, all_summaries
 
 

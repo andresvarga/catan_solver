@@ -62,6 +62,22 @@ assert len(AXIAL_COORDS) == 19
 
 _HEX_SIZE = 10.0  # arbitrary unit; only used to dedupe shared corners
 
+_AXIAL_DIRECTIONS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]
+_HEX_NEIGHBORS = [
+    [AXIAL_COORDS.index((q + dq, r + dr)) for dq, dr in _AXIAL_DIRECTIONS
+     if (q + dq, r + dr) in AXIAL_COORDS]
+    for q, r in AXIAL_COORDS
+]
+
+
+def _red_numbers_adjacent(terrains: list, numbers: list[int]) -> bool:
+    """True if a 6 or 8 token would sit next to another 6 or 8 when
+    `numbers` are dealt in hex order, skipping the desert."""
+    it = iter(numbers)
+    per_hex = [None if t == HexType.DESERT else next(it) for t in terrains]
+    return any(per_hex[i] in (6, 8) and any(per_hex[j] in (6, 8) for j in _HEX_NEIGHBORS[i])
+               for i in range(len(per_hex)))
+
 
 def _axial_to_pixel(q: int, r: int) -> tuple[float, float]:
     x = _HEX_SIZE * (math.sqrt(3) * q + math.sqrt(3) / 2 * r)
@@ -150,6 +166,11 @@ def generate_board(randomize: bool = True, seed: int | None = None) -> Board:
     numbers = list(STANDARD_NUMBER_TOKENS)
     if randomize:
         rng.shuffle(terrains)
+        rng.shuffle(numbers)
+    # Official variable set-up: red numbers (6, 8) must not be on adjacent
+    # hexes. Re-deal the tokens (same seeded rng, so still deterministic per
+    # seed -- this applies to the fixed curriculum board too) until they aren't.
+    while _red_numbers_adjacent(terrains, numbers):
         rng.shuffle(numbers)
 
     # --- geometry pass: build hexes, dedup vertices/edges by pixel position ---

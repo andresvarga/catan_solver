@@ -335,11 +335,15 @@ def distribute_resources(state: GameState, total: int) -> dict[int, dict[Resourc
                 continue
             gains[owner][resource] += 2 if kind == "city" else 1
 
+    # Official shortage rule: if the supply can't cover everyone's production
+    # of a resource, nobody receives it -- unless only one player is owed it,
+    # in which case that player takes whatever remains.
     for resource in Resource:
         requested = sum(g[resource] for g in gains.values())
         if requested > state.bank[resource]:
-            for g in gains.values():
-                g[resource] = 0
+            owed = [pid for pid, g in gains.items() if g[resource] > 0]
+            for pid, g in gains.items():
+                g[resource] = state.bank[resource] if len(owed) == 1 and pid in owed else 0
 
     for pid, g in gains.items():
         for resource, amt in g.items():
@@ -500,7 +504,7 @@ def legal_actions(state: GameState) -> list[Action]:
                     ratio = trade_ratio_for(state, actor, give_r)
                     if hand.get(give_r, 0) >= ratio:
                         for want_r in Resource:
-                            if want_r != give_r:
+                            if want_r != give_r and state.bank[want_r] >= 1:  # supply must have it
                                 actions.append(Action(ActionType.MARITIME_TRADE,
                                                        {"give": give_r, "receive": want_r}))
 
@@ -746,6 +750,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
                     from env.board import HEX_TO_RESOURCE
                     resource = HEX_TO_RESOURCE[hx.terrain]
                     state.players[actor].resources[resource] += 1
+                    state.bank[resource] -= 1  # cards come from the supply (19 of each)
                     _public_gain(state, actor, resource, 1)  # setup grants are public
         recompute_longest_road(state)
         state.setup_order_index += 1

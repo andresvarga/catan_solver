@@ -114,3 +114,31 @@ def test_write_manifest_records_run_and_keeps_history(tmp_path):
     assert m["git_commit"] and "git_dirty_files" in m and m["torch"]
     write_manifest(str(tmp_path), args)
     assert (tmp_path / "manifest.1.json").exists()
+
+
+def test_parallel_rollouts_reproduce_sequential_exactly():
+    """F-22: rollout data is a pure function of (weights, seeds) -- worker
+    count and process scheduling must not change it."""
+    import random as _random
+    import torch
+    from agents.heuristic import HeuristicAgent
+    from training.hier_model import HierarchicalActorCritic
+    from training.hier_ppo import collect_rollout, collect_rollout_parallel
+
+    torch.manual_seed(0)
+    model = HierarchicalActorCritic(obs_dim=observation_dim(), hidden=32).eval()
+    kwargs = dict(randomize_board=True, max_episode_steps=400)
+
+    def sig(trs):  # chosen actions + rewards must match exactly
+        return [(t["reward"], t["type_idx"], t["sub_idx_1"], t["sub_idx_2"],
+                 tuple(t["trade_counts"]), t["done"]) for t in trs]
+
+    def close_logprobs(a, b):  # BLAS thread count differs parent vs worker: ~1e-6 noise
+        return all(abs(x["logprob"] - y["logprob"]) < 1e-4 for x, y in zip(a, b))
+
+    for opponents in (None, {pid: HeuristicAgent(pid, _random.Random(pid)) for pid in (1, 2, 3)}):
+        seq, _ = collect_rollout(CatanAECEnv(**kwargs), model, "cpu", 6, 500, opponent_agents=opponents)
+        par2, _ = collect_rollout_parallel(kwargs, model, 6, 500, 2, opponent_agents=opponents)
+        par3, _ = collect_rollout_parallel(kwargs, model, 6, 500, 3, opponent_agents=opponents)
+        assert sig(seq) == sig(par2) == sig(par3) and len(seq) > 100
+        assert close_logprobs(seq, par2) and close_logprobs(seq, par3)
