@@ -1,0 +1,10 @@
+{"label": "O0-baseline", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 3401, "steps_per_s_sd": 10, "transitions_per_s_mean": 2482, "env_steps": 24531, "transitions": 17900}
+{"label": "O0-baseline", "config": "gnn256x4-phf cuda envs=32 opp=selfplay", "steps_per_s_mean": 2466, "steps_per_s_sd": 16, "transitions_per_s_mean": 1803, "env_steps": 99010, "transitions": 72369}
+{"label": "O1-skip-revalidation", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 3571, "steps_per_s_sd": 15, "transitions_per_s_mean": 2606, "env_steps": 24531, "transitions": 17900}
+{"label": "O1-skip-revalidation", "config": "gnn256x4-phf cuda envs=32 opp=selfplay", "steps_per_s_mean": 2509, "steps_per_s_sd": 90, "transitions_per_s_mean": 1834, "env_steps": 99010, "transitions": 72369}
+{"label": "O2-fused-flat-encoder", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 5271, "steps_per_s_sd": 44, "transitions_per_s_mean": 3846, "env_steps": 24531, "transitions": 17900}
+{"label": "O3-small-sampler+trade-mlp-cache", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 6685, "steps_per_s_sd": 57, "transitions_per_s_mean": 4878, "env_steps": 24531, "transitions": 17900}
+{"label": "O3-small-sampler+trade-mlp-cache", "config": "gnn256x4-phf cuda envs=32 opp=selfplay", "steps_per_s_mean": 2646, "steps_per_s_sd": 31, "transitions_per_s_mean": 1934, "env_steps": 99010, "transitions": 72369}
+{"label": "O4-graph-beliefs-once", "config": "gnn256x4-phf cuda envs=32 opp=selfplay", "steps_per_s_mean": 2567, "steps_per_s_sd": 27, "transitions_per_s_mean": 1876, "env_steps": 99010, "transitions": 72369}
+{"label": "O6-trade-forced-steps", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 4994, "steps_per_s_sd": 518, "transitions_per_s_mean": 3644, "env_steps": 24531, "transitions": 17900}
+{"label": "O6-trade-forced-steps-clean", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 6964, "steps_per_s_sd": 30, "transitions_per_s_mean": 5081, "env_steps": 24531, "transitions": 17900}

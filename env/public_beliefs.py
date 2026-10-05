@@ -67,3 +67,21 @@ def last_offer(state: GameState, pid: int):
 def seat_order(observer: int) -> list[int]:
     """Absolute seats in observer-relative order: me, then turn order."""
     return [(observer + k) % NUM_PLAYERS for k in range(NUM_PLAYERS)]
+
+
+def expected_dev_cards_all(state: GameState, observer: int) -> dict[int, dict[DevCard, float]]:
+    """`expected_dev_cards(state, observer, pid)` for every seat, computing the
+    unknown-card composition once (identical arithmetic, ~4x less work)."""
+    unknown = unknown_dev_composition(state, observer)
+    pool = sum(unknown.values())
+    out = {}
+    for pid, p in state.players.items():
+        if pid == observer:
+            out[pid] = {c: float(k) for c, k in p.dev_cards.items()}
+            continue
+        held = p.total_dev_cards()
+        if pool <= 0 or held == 0:
+            out[pid] = {c: 0.0 for c in DevCard}
+        else:
+            out[pid] = {c: held * unknown[c] / pool for c in DevCard}
+    return out

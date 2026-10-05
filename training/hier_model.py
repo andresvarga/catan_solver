@@ -29,6 +29,7 @@ Simplifications kept deliberately narrow in scope:
 """
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
 
 import numpy as np
@@ -368,6 +369,8 @@ def masked_sample_np(logits: np.ndarray, mask: np.ndarray, deterministic: bool,
     function of the episode seed however decisions are batched. Returns
     (index, log-prob of that index); the gradient path recomputes log-probs
     in torch (`evaluate_actions`)."""
+    if len(logits) < 8:
+        return _masked_sample_small(logits, mask, deterministic, rng)
     l = np.where(mask > 0, logits.astype(np.float64), -np.inf)
     mx = l.max()
     z = np.exp(l - mx)
@@ -382,12 +385,46 @@ def masked_sample_np(logits: np.ndarray, mask: np.ndarray, deterministic: bool,
     return idx, float(l[idx] - mx - np.log(total))
 
 
+def _masked_sample_small(logits: np.ndarray, mask: np.ndarray, deterministic: bool,
+                         rng: np.random.Generator) -> tuple[int, float]:
+    """masked_sample_np for heads of < 8 options (trade counts, resources,
+    players) in plain Python floats: same float64 math, same Generator draw,
+    without ~10 NumPy calls of per-call overhead (performance audit O3). The
+    only difference from the NumPy path is the summation order inside
+    np.sum, which can change the log-prob's last bit and -- only if the
+    uniform draw lands within one ulp of a probability boundary -- the sample."""
+    l = [x if m > 0 else -math.inf for x, m in zip(logits.tolist(), mask.tolist())]
+    mx = max(l)
+    z = [math.exp(x - mx) for x in l]
+    total = sum(z)
+    if deterministic:
+        idx = l.index(mx)
+    else:
+        u = rng.random() * total
+        c, idx = 0.0, len(z) - 1
+        for i, v in enumerate(z):
+            c += v
+            if c > u:
+                idx = i
+                break
+        while z[idx] == 0.0:
+            idx -= 1
+    return idx, (l[idx] - mx) - math.log(total)
+
+
 def _trade_mlp_np(head: "TradeCountHead"):
-    """Trade head weights as NumPy arrays (W1, b1, W2, b2), cached per call
-    of act_batch."""
+    """Trade head weights as NumPy arrays (W1, b1, W2, b2). Cached on the head
+    and refreshed only when a parameter changes (its tensor version counter
+    bumps on every optimizer step): rollout workers then pay the conversion
+    -- a device->host copy for GPU inference -- once, not per batch."""
     lin1, lin2 = head.net[0], head.net[2]
-    return (lin1.weight.detach().float().cpu().numpy(), lin1.bias.detach().float().cpu().numpy(),
-            lin2.weight.detach().float().cpu().numpy(), lin2.bias.detach().float().cpu().numpy())
+    params = (lin1.weight, lin1.bias, lin2.weight, lin2.bias)
+    key = tuple((id(p), p._version, p.device) for p in params)
+    cached = getattr(head, "_np_cache", None)
+    if cached is None or cached[0] != key:
+        cached = (key, tuple(p.detach().float().cpu().numpy() for p in params))
+        object.__setattr__(head, "_np_cache", cached)
+    return cached[1]
 
 
 def decode_trade(trade_mlp, feats_row: np.ndarray, template: Action, idx1: int,
@@ -407,9 +444,19 @@ def decode_trade(trade_mlp, feats_row: np.ndarray, template: Action, idx1: int,
     prefix = np.zeros(TRADE_STEPS, dtype=np.float32)
     for k in range(TRADE_STEPS):
         m = trade_step_mask(k, counts, hand)
-        h = np.maximum(base + w_prefix @ prefix + w_step[:, k], 0.0)
-        logits = w2 @ h + b2
-        c, lp = masked_sample_np(logits, m, deterministic, rng)
+        allowed = np.flatnonzero(m)
+        if len(allowed) == 1:
+            # Forced step (e.g. giving a resource not held): the sampler's result is
+            # fully determined -- index = the only option, log-prob exactly 0.0 -- so
+            # skip the MLP, but still consume the Generator draw the sampler would
+            # have made, keeping the random stream identical (performance audit O6).
+            c, lp = int(allowed[0]), 0.0
+            if not deterministic:
+                rng.random()
+        else:
+            h = np.maximum(base + w_prefix @ prefix + w_step[:, k], 0.0)
+            logits = w2 @ h + b2
+            c, lp = masked_sample_np(logits, m, deterministic, rng)
         counts.append(c)
         masks.append(m)
         logprob += lp

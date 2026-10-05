@@ -1,0 +1,2 @@
+{"workload": "startup", "model": "hier256x3", "workers": 12, "device": "cpu", "seconds": {"mean": 0.1, "median": 0.1, "min": 0.1, "max": 0.1, "std": 0.0}, "tag": "baseline"}
+{"workload": "startup", "model": "gnn256x4", "workers": 4, "device": "cuda", "seconds": {"mean": 2.5, "median": 2.5, "min": 2.4, "max": 2.6, "std": 0.1}, "tag": "baseline"}

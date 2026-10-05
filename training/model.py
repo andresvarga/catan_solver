@@ -99,3 +99,161 @@ def observation_dim(public_hand_features: bool = False) -> int:
     env.reset(seed=0)
     obs = env.observe(env.agent_selection)
     return flatten_observation(obs).shape[0]
+
+
+# --------------------------------------------------------------------------
+# Fused encoder (simulation performance audit): `encode_flat(state, pid, phf)` is
+# bit-identical to `flatten_observation(build_observation(state, pid, ...))` but
+# skips the intermediate observation dict and ~40 small array allocations. Every
+# feature is written as its raw float32 value into one buffer that is divided once,
+# elementwise, by a constant float32 scale vector -- the same IEEE float32 ops the
+# per-part `x.astype(float32) / scale` performs, so the result is identical.
+# --------------------------------------------------------------------------
+_LAYOUT_CACHE: dict[bool, tuple] = {}
+
+
+def _layout(phf: bool):
+    if phf in _LAYOUT_CACHE:
+        return _LAYOUT_CACHE[phf]
+    from env.pettingzoo_env import NUM_EDGES, NUM_HEXES, NUM_VERTICES
+    parts = [  # (name, length, scale) in flatten_observation order
+        ("hex_terrain", NUM_HEXES, 5.0), ("hex_number", NUM_HEXES, 12.0), ("robber", NUM_HEXES, 1.0),
+        ("vertex_owner", NUM_VERTICES, 4.0), ("vertex_type", NUM_VERTICES, 2.0),
+        ("port_generic", NUM_VERTICES, 1.0), ("port_resource", NUM_VERTICES, 5.0),
+        ("edge_owner", NUM_EDGES, 4.0),
+        ("own_resources", 5, 19.0), ("own_dev", 5, 25.0), ("own_playable", 5, 25.0),
+        ("hand", 4, 40.0), ("visible_vp", 4, 12.0), ("settlements", 4, 5.0), ("cities", 4, 4.0),
+        ("roads", 4, 15.0), ("knights", 4, 14.0), ("dev_count", 4, 25.0),
+        ("exp_vp", 4, 5.0), ("exp_kn", 4, 14.0), ("dev_age", 4, 1.0),
+        ("offer_give", 20, 3.0), ("offer_want", 20, 3.0), ("offer_age", 4, 1.0),
+        ("lr_holder", 5, 1.0), ("la_holder", 5, 1.0), ("current", 4, 1.0), ("acting", 4, 1.0),
+        ("phase", len(PHASE_LIST), 1.0), ("dice", 2, 6.0),
+        ("pending_give", 5, 19.0), ("pending_want", 5, 19.0), ("pending_proposer", 5, 1.0),
+        ("counter_give", 5, 19.0), ("counter_want", 5, 19.0), ("counter_proposer", 5, 1.0),
+        ("pending_targets", 4, 1.0), ("trades_proposed", 1, float(MAX_TRADE_PROPOSALS_PER_TURN)),
+        ("bank", 5, 19.0), ("deck", 1, 25.0),
+    ]
+    if phf:
+        parts += [("est", 20, 19.0), ("est_unknown", 4, 40.0)]
+    off, pos = {}, 0
+    for name, n, _ in parts:
+        off[name] = pos
+        pos += n
+    scale = np.concatenate([np.full(n, s, dtype=np.float32) for _, n, s in parts])
+    _LAYOUT_CACHE[phf] = (off, pos, scale)
+    return _LAYOUT_CACHE[phf]
+
+
+def _static_raw(board, phf: bool) -> np.ndarray:
+    """Board-static raw values (terrain, numbers, ports), cached on the Board."""
+    key = "_flat_raw_static_phf" if phf else "_flat_raw_static"
+    cached = getattr(board, key, None)
+    if cached is None:
+        from env.pettingzoo_env import HEXTYPE_INDEX, NUM_HEXES, NUM_VERTICES, RESOURCE_INDEX
+        off, size, _ = _layout(phf)
+        cached = np.zeros(size, dtype=np.float32)
+        for hx in board.hexes.values():
+            cached[off["hex_terrain"] + hx.id] = HEXTYPE_INDEX[hx.terrain]
+            cached[off["hex_number"] + hx.id] = hx.number or 0
+        cached[off["port_resource"]: off["port_resource"] + NUM_VERTICES] = 0.0  # (-1 + 1)
+        for vid, v in board.vertices.items():
+            if v.port_generic:
+                cached[off["port_generic"] + vid] = 1.0
+            if v.port is not None:
+                cached[off["port_resource"] + vid] = RESOURCE_INDEX[v.port] + 1
+        setattr(board, key, cached)
+    return cached
+
+
+def encode_flat(state, pid: int, public_hand_features: bool = False) -> np.ndarray:
+    from env.engine import acting_player
+    from env.pettingzoo_env import PHASE_INDEX, RESOURCE_INDEX, RESOURCE_LIST, DEV_CARD_LIST, \
+        public_hand_estimate_arrays
+    from env.public_beliefs import expected_dev_cards_all, last_offer, turns_since_dev_purchase
+    from env.state import DevCard
+    off, size, scale = _layout(public_hand_features)
+    raw = _static_raw(state.board, public_hand_features).copy()
+    me_ = pid
+    rel = lambda seat: (seat - me_) % NUM_PLAYERS  # noqa: E731
+
+    raw[off["robber"] + state.board.robber_hex] = 1.0
+    vo, vt, eo = off["vertex_owner"], off["vertex_type"], off["edge_owner"]
+    for other, p in state.players.items():
+        r1 = rel(other) + 1
+        for vid in p.settlements:
+            raw[vo + vid] = r1
+            raw[vt + vid] = 1
+        for vid in p.cities:
+            raw[vo + vid] = r1
+            raw[vt + vid] = 2
+        for eid in p.roads:
+            raw[eo + eid] = r1
+
+    me = state.players[pid]
+    for i, r in enumerate(RESOURCE_LIST):
+        raw[off["own_resources"] + i] = me.resources[r]
+    for i, c in enumerate(DEV_CARD_LIST):
+        raw[off["own_dev"] + i] = me.dev_cards[c]
+        raw[off["own_playable"] + i] = me.dev_cards[c] - me.dev_cards_bought_this_turn[c]
+
+    beliefs = expected_dev_cards_all(state, pid)
+    f32 = np.float32
+    for row, seat in enumerate((pid + k) % NUM_PLAYERS for k in range(NUM_PLAYERS)):
+        p = state.players[seat]
+        raw[off["hand"] + row] = p.hand_size()
+        raw[off["visible_vp"] + row] = p.visible_vp()
+        raw[off["settlements"] + row] = len(p.settlements)
+        raw[off["cities"] + row] = len(p.cities)
+        raw[off["roads"] + row] = len(p.roads)
+        raw[off["knights"] + row] = p.knights_played
+        raw[off["dev_count"] + row] = p.total_dev_cards()
+        exp = beliefs[seat]
+        raw[off["exp_vp"] + row] = f32(exp[DevCard.VICTORY_POINT])
+        raw[off["exp_kn"] + row] = f32(exp[DevCard.KNIGHT])
+        raw[off["dev_age"] + row] = f32(turns_since_dev_purchase(state, seat))
+        g, w, age = last_offer(state, seat)
+        for r, k in g.items():
+            raw[off["offer_give"] + row * 5 + RESOURCE_INDEX[r]] = k
+        for r, k in w.items():
+            raw[off["offer_want"] + row * 5 + RESOURCE_INDEX[r]] = k
+        raw[off["offer_age"] + row] = f32(age)
+
+    lr = state.longest_road_holder
+    raw[off["lr_holder"] + (0 if lr is None else rel(lr) + 1)] = 1.0
+    la = state.largest_army_holder
+    raw[off["la_holder"] + (0 if la is None else rel(la) + 1)] = 1.0
+    raw[off["current"] + rel(state.current_player)] = 1.0
+    raw[off["acting"] + rel(acting_player(state))] = 1.0
+    raw[off["phase"] + PHASE_INDEX[state.phase]] = 1.0
+    if state.dice_roll is not None:
+        raw[off["dice"]], raw[off["dice"] + 1] = state.dice_roll
+    pt = state.pending_trade
+    if pt is not None:
+        for r, k in pt.give.items():
+            raw[off["pending_give"] + RESOURCE_INDEX[r]] = k
+        for r, k in pt.want.items():
+            raw[off["pending_want"] + RESOURCE_INDEX[r]] = k
+        raw[off["pending_proposer"] + rel(pt.proposer) + 1] = 1.0
+        for t in pt.targets:
+            raw[off["pending_targets"] + rel(t)] = 1.0
+    else:
+        raw[off["pending_proposer"]] = 1.0
+    ct = state.trade_counter_context
+    if ct is not None:
+        for r, k in ct.give.items():
+            raw[off["counter_give"] + RESOURCE_INDEX[r]] = k
+        for r, k in ct.want.items():
+            raw[off["counter_want"] + RESOURCE_INDEX[r]] = k
+        raw[off["counter_proposer"] + rel(ct.proposer) + 1] = 1.0
+    else:
+        raw[off["counter_proposer"]] = 1.0
+    raw[off["trades_proposed"]] = state.trades_proposed_this_turn
+    for i, r in enumerate(RESOURCE_LIST):
+        raw[off["bank"] + i] = state.bank[r]
+    raw[off["deck"]] = len(state.dev_card_deck)
+    if public_hand_features:
+        est, unknown = public_hand_estimate_arrays(state)
+        order = [(pid + k) % NUM_PLAYERS for k in range(NUM_PLAYERS)]
+        raw[off["est"]: off["est"] + 20] = est[order].reshape(-1)
+        raw[off["est_unknown"]: off["est_unknown"] + 4] = unknown[order]
+    return raw / scale

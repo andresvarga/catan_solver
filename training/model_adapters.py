@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from training.graph_features import build_graph_observation
-from training.model import flatten_observation
+from training.model import encode_flat
 
 
 @dataclass
@@ -33,7 +33,10 @@ class ModelAdapter:
 
 
 def _flat_encode(env, obs, pid):
-    return flatten_observation(obs)
+    # fused encoder straight from the engine state: bit-identical to
+    # flatten_observation(obs) but skips building the observation dict
+    # (performance audit O2; tests/test_fast_encoder.py)
+    return encode_flat(env.engine.state, pid, env.public_hand_features)
 
 
 def _flat_to_single(encoded, device):
@@ -44,7 +47,8 @@ def _flat_to_batch(encoded_list, device):
     return torch.tensor(np.array(encoded_list), dtype=torch.float32, device=device)
 
 
-FLAT_ADAPTER = ModelAdapter(encode=_flat_encode, to_single=_flat_to_single, to_batch=_flat_to_batch)
+FLAT_ADAPTER = ModelAdapter(encode=_flat_encode, to_single=_flat_to_single, to_batch=_flat_to_batch,
+                            needs_raw_obs=False)
 
 
 def _graph_encode(env, obs, pid):

@@ -1,0 +1,96 @@
+{
+ "args": {
+  "model": "hier",
+  "hidden": 256,
+  "layers": 3,
+  "phf": false,
+  "envs": 16,
+  "episodes": 8,
+  "device": "cpu",
+  "opponents": "selfplay",
+  "alloc": false,
+  "out": "audit/results/perf/afterO4_components_hier_envs16.json"
+ },
+ "wall": 2.679895317007322,
+ "transitions": 8164,
+ "env_steps": 11279,
+ "components": {
+  "policy: forward (head_logits_batch)": {
+   "seconds": 0.49347530788509175,
+   "calls": 2104
+  },
+  "policy: trade bundle decode": {
+   "seconds": 0.46790649618196767,
+   "calls": 2698
+  },
+  "obs: adapter.encode (glue)": {
+   "seconds": 0.41078447716427036,
+   "calls": 8164
+  },
+  "policy: numpy sampling (sample_decision)": {
+   "seconds": 0.34023688996967394,
+   "calls": 8164
+  },
+  "engine.legal_actions": {
+   "seconds": 0.22940243179618847,
+   "calls": 11279
+  },
+  "policy: act_batch (python/glue)": {
+   "seconds": 0.12830995430704206,
+   "calls": 2104
+  },
+  "env.step (bookkeeping)": {
+   "seconds": 0.12556665709416848,
+   "calls": 11311
+  },
+  "engine.step (rules)": {
+   "seconds": 0.11875066082575358,
+   "calls": 11279
+  },
+  "runner.advance (bookkeeping)": {
+   "seconds": 0.10002092941431329,
+   "calls": 8172
+  },
+  "policy: obs -> tensor": {
+   "seconds": 0.07173175924981479,
+   "calls": 2104
+  },
+  "runner.apply (bookkeeping)": {
+   "seconds": 0.04954180255299434,
+   "calls": 8164
+  },
+  "engine.is_legal_action (validation)": {
+   "seconds": 0.02588850435859058,
+   "calls": 2698
+  },
+  "env.last": {
+   "seconds": 0.021816516324179247,
+   "calls": 11311
+  },
+  "env.__init__": {
+   "seconds": 0.007049166990327649,
+   "calls": 8
+  },
+  "reset: new_game/generate_board": {
+   "seconds": 0.004036168000311591,
+   "calls": 8
+  },
+  "env.reset": {
+   "seconds": 0.00018165599612984806,
+   "calls": 8
+  },
+  "runner: opponent copies": {
+   "seconds": 1.9557017367333174e-05,
+   "calls": 8
+  }
+ },
+ "gc": {
+  "collections": [
+   0,
+   11,
+   0
+  ],
+  "seconds": 3.848296182695776e-05
+ },
+ "top_alloc": []
+}

@@ -1,0 +1,104 @@
+{
+ "args": {
+  "model": "gnn",
+  "hidden": 256,
+  "layers": 4,
+  "phf": true,
+  "envs": 32,
+  "episodes": 32,
+  "device": "cuda",
+  "opponents": "selfplay",
+  "alloc": false,
+  "out": "audit/results/perf/baseline_components_gnn256_cuda_envs32.json"
+ },
+ "wall": 21.573881845994038,
+ "transitions": 34111,
+ "env_steps": 46315,
+ "components": {
+  "policy: forward (head_logits_batch)": {
+   "seconds": 9.178090031564352,
+   "calls": 2160
+  },
+  "policy: trade bundle decode": {
+   "seconds": 3.3469389323727228,
+   "calls": 12162
+  },
+  "obs: build_graph_observation": {
+   "seconds": 1.7106318633886985,
+   "calls": 34111
+  },
+  "engine.legal_actions": {
+   "seconds": 1.3988144269096665,
+   "calls": 80468
+  },
+  "policy: numpy sampling (sample_decision)": {
+   "seconds": 1.2809443417936563,
+   "calls": 34111
+  },
+  "policy: act_batch (python/glue)": {
+   "seconds": 0.7206493084668182,
+   "calls": 2160
+  },
+  "obs: public beliefs": {
+   "seconds": 0.6503768878465053,
+   "calls": 102333
+  },
+  "env.step (bookkeeping)": {
+   "seconds": 0.613881428987952,
+   "calls": 46443
+  },
+  "policy: obs -> tensor": {
+   "seconds": 0.5936296012223465,
+   "calls": 2160
+  },
+  "engine.step (rules)": {
+   "seconds": 0.4288515066727996,
+   "calls": 46315
+  },
+  "runner.advance (bookkeeping)": {
+   "seconds": 0.3874236503324937,
+   "calls": 34143
+  },
+  "engine.is_legal_action (validation)": {
+   "seconds": 0.3506848090037238,
+   "calls": 58477
+  },
+  "runner.apply (bookkeeping)": {
+   "seconds": 0.2116953393415315,
+   "calls": 34111
+  },
+  "obs: adapter.encode (glue)": {
+   "seconds": 0.1414895257767057,
+   "calls": 34111
+  },
+  "env.last": {
+   "seconds": 0.10990181149099953,
+   "calls": 46443
+  },
+  "env.__init__": {
+   "seconds": 0.028674290006165393,
+   "calls": 32
+  },
+  "reset: new_game/generate_board": {
+   "seconds": 0.015747125013149343,
+   "calls": 32
+  },
+  "env.reset": {
+   "seconds": 0.0007023229991318658,
+   "calls": 32
+  },
+  "runner: opponent copies": {
+   "seconds": 7.514699245803058e-05,
+   "calls": 32
+  }
+ },
+ "gc": {
+  "collections": [
+   0,
+   72,
+   0
+  ],
+  "seconds": 0.028102501964895055
+ },
+ "top_alloc": []
+}

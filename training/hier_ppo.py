@@ -24,6 +24,7 @@ rather than a duplicated `gnn_ppo.py`.
 """
 from __future__ import annotations
 
+import atexit
 import copy
 import multiprocessing as mp
 import os
@@ -385,12 +386,10 @@ def collect_rollout_parallel(env_kwargs: dict, model,
     chunks = [seeds[i::num_workers] for i in range(num_workers)]
     chunks = [c for c in chunks if c]
 
-    if inference_device == "cpu":
-        ctx, worker_model = mp.get_context("fork"), model
-    else:
-        # a CUDA context can't survive fork: spawn fresh processes and ship
-        # them a CPU copy of the weights (each moves it to the GPU)
-        ctx, worker_model = mp.get_context("spawn"), copy.deepcopy(model).to("cpu")
+    if inference_device != "cpu":
+        return _assemble(_collect_spawned(model, env_kwargs, chunks, opponent_agents, opponent_name,
+                                          adapter, gamma, lam, envs_per_worker, inference_device))
+    ctx, worker_model = mp.get_context("fork"), model
     # concurrent.futures rather than multiprocessing.Pool: a worker that dies
     # (e.g. failing to initialize) raises BrokenProcessPool instead of being
     # silently respawned forever.
@@ -410,6 +409,74 @@ def collect_rollout_parallel(env_kwargs: dict, model,
                 raise
             print(f"rollout worker pool broke; retrying ({attempt + 1}/2)", flush=True)
     return _assemble(ep for chunk in results for ep in chunk)
+
+
+# -- persistent spawned (GPU-inference) workers -------------------------------
+# A CUDA context can't survive fork, so GPU-inference workers are spawned -- and
+# spawning + CUDA initialisation costs ~2.5 s per call (performance audit),
+# ~40% of a typical rl_finetune rollout. These pools are therefore created once
+# per (workers, device, architecture) and reused; every call ships the current
+# weights (state_dict) and that call's settings with the task. Forked CPU pools
+# stay per-call: forking is ~0.1 s and inherits the current weights for free.
+_SPAWN_POOLS: dict[tuple, ProcessPoolExecutor] = {}
+
+
+def _arch_key(model) -> tuple:
+    return (type(model).__name__,) + tuple((k, tuple(v.shape)) for k, v in model.state_dict().items())
+
+
+def _init_spawned_worker(model_template, device: str) -> None:
+    global _worker_model, _worker_device
+    torch.set_num_threads(1)
+    _worker_model = model_template.to(device).eval()
+    _worker_device = device
+
+
+def _spawned_task(payload) -> list[tuple[int, list[dict], dict]]:
+    global _worker_env_kwargs, _worker_opponent_agents, _worker_opponent_name
+    global _worker_adapter, _worker_gamma, _worker_lam, _worker_num_envs
+    (state_dict, env_kwargs, opponents, opponent_name, adapter, gamma, lam, num_envs, seeds) = payload
+    _worker_model.load_state_dict(state_dict)
+    _worker_model.eval()
+    _worker_env_kwargs, _worker_opponent_agents, _worker_opponent_name = env_kwargs, opponents, opponent_name
+    _worker_adapter, _worker_gamma, _worker_lam, _worker_num_envs = adapter, gamma, lam, num_envs
+    return _worker_collect(seeds)
+
+
+def _collect_spawned(model, env_kwargs, chunks, opponent_agents, opponent_name, adapter, gamma, lam,
+                     envs_per_worker, device):
+    key = (len(chunks), device, _arch_key(model))
+    state_dict = {k: v.detach().to("cpu") for k, v in model.state_dict().items()}
+    payloads = [(state_dict, env_kwargs, opponent_agents, opponent_name, adapter, gamma, lam,
+                 envs_per_worker, c) for c in chunks]
+    for attempt in range(3):
+        pool = _SPAWN_POOLS.get(key)
+        if pool is None:
+            pool = ProcessPoolExecutor(max_workers=len(chunks), mp_context=mp.get_context("spawn"),
+                                       initializer=_init_spawned_worker,
+                                       initargs=(copy.deepcopy(model).to("cpu"), device))
+            _SPAWN_POOLS[key] = pool
+        try:
+            return [ep for chunk in pool.map(_spawned_task, payloads) for ep in chunk]
+        except BrokenProcessPool:
+            # a worker died (seen once: a PyTorch-internal clock assertion in a
+            # spawned CUDA worker); rollouts are deterministic, so rebuild + retry
+            _SPAWN_POOLS.pop(key, None)
+            pool.shutdown(wait=False, cancel_futures=True)
+            if attempt == 2:
+                raise
+            print(f"rollout worker pool broke; retrying ({attempt + 1}/2)", flush=True)
+
+
+def close_rollout_pools() -> None:
+    """Shut down persistent GPU rollout workers (frees their CUDA contexts,
+    ~134 MiB each plus the model)."""
+    for pool in _SPAWN_POOLS.values():
+        pool.shutdown(wait=True, cancel_futures=True)
+    _SPAWN_POOLS.clear()
+
+
+atexit.register(close_rollout_pools)
 
 
 def load_bc_anchor(path: str, device: str, max_samples: int | None = None,

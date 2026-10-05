@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from env.board import HEX_TO_RESOURCE, PIP_COUNT, HexType, Resource
-from env.public_beliefs import expected_dev_cards, last_offer, turns_since_dev_purchase
+from env.public_beliefs import expected_dev_cards_all, last_offer, turns_since_dev_purchase
 from env.state import DevCard, GameState, MAX_TRADE_PROPOSALS_PER_TURN, Phase
 
 RESOURCE_LIST = list(Resource)
@@ -144,6 +144,7 @@ def build_graph_observation(state: GameState, pid: int,
 
     opponent_features = np.zeros((NUM_OPPONENTS, opponent_feat_dim(public_hand_features)),
                                   dtype=np.float32)
+    beliefs = expected_dev_cards_all(state, pid)  # composition computed once (audit O4)
     for offset in range(NUM_OPPONENTS):
         opp_pid = (pid + 1 + offset) % 4
         p = state.players[opp_pid]
@@ -157,7 +158,7 @@ def build_graph_observation(state: GameState, pid: int,
         row[6] = p.total_dev_cards() / 25.0
         row[7] = 1.0 if state.longest_road_holder == opp_pid else 0.0
         row[8] = 1.0 if state.largest_army_holder == opp_pid else 0.0
-        exp = expected_dev_cards(state, pid, opp_pid)
+        exp = beliefs[opp_pid]
         row[9] = exp[DevCard.VICTORY_POINT] / 5.0
         row[10] = exp[DevCard.KNIGHT] / 14.0
         row[11] = turns_since_dev_purchase(state, opp_pid)

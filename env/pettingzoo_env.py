@@ -235,7 +235,10 @@ class CatanAECEnv(AECEnv):
                                   "concrete trade Action (engine.make_trade) instead")
 
         self.rewards = {a: 0.0 for a in self.agents}
-        self.engine.step(concrete)
+        # already validated above (index into this step's legal list, or
+        # is_legal_action for a submitted Action): skip the engine's own check,
+        # which would re-enumerate every legal action (performance audit O1)
+        self.engine.step(concrete, validate=False)
         self._step_count += 1
 
         state = self.engine.state

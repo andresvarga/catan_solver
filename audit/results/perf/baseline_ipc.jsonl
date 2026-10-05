@@ -1,0 +1,2 @@
+{"workload": "ipc", "model": "hier256x3", "phf": false, "transitions": 9048, "payload_mb": 27.91, "bytes_per_transition": 3235, "pickle_us_per_transition": 15.42, "unpickle_us_per_transition": 16.55, "tag": "baseline"}
+{"workload": "ipc", "model": "gnn256x4", "phf": true, "transitions": 5337, "payload_mb": 37.62, "bytes_per_transition": 7392, "pickle_us_per_transition": 34.45, "unpickle_us_per_transition": 32.78, "tag": "baseline"}

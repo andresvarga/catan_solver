@@ -53,8 +53,12 @@ def _labeler_owns_decision(labeler_kind: str, state, expert_action, labeler=None
     exactly the decisions search cannot own and BC kept reverting them to
     heuristic behavior. So for those labelers, only searched decisions are
     recorded; the plain-heuristic labeler keeps recording everything (its
-    students have no better prior to protect)."""
-    if labeler_kind == "heuristic":
+    students have no better prior to protect). The 'self' labeler -- the
+    champion's own deterministic choice at states visited under its own
+    (sampled) rollout policy, i.e. a self-distillation anchor -- also records
+    everything: it never defers to anything foreign, so there's nothing to
+    filter out."""
+    if labeler_kind in ("heuristic", "self"):
         return True
     if labeler_kind == "rollout-override":
         # Strictest filter (after 'rollout' with the searched-decision filter
@@ -82,7 +86,18 @@ def make_labeler(kind: str, seat: int, rng: random.Random,
     candidates are settled by determinized rollouts in which THIS seat's
     continuations are played by `model` (the current student) -- the teacher
     is literally search wrapped around the policy being trained, so it
-    strengthens automatically as the student improves round over round."""
+    strengthens automatically as the student improves round over round.
+    'self' is a self-distillation anchor: the labeler IS `model`, run
+    deterministically, so the recorded targets are exactly the champion's own
+    current preferences on states visited under its own (sampled) play --
+    broad, representative, and immune to the catastrophic-forgetting failure
+    mode of imitating a foreign teacher (see module docstring)."""
+    if kind == "self":
+        assert model is not None, "labeler 'self' needs the student model"
+        from training.agent import HierarchicalLearnedAgent
+        return HierarchicalLearnedAgent(seat, deterministic=True, model=model,
+                                         model_kind=model_type,
+                                         public_hand_features=public_hand_features)
     if kind in ("rollout", "rollout-override"):
         assert model is not None, f"labeler '{kind}' needs the student model"
         from agents.search_heuristic import RolloutSearchAgent
@@ -224,7 +239,7 @@ def main():
     parser.add_argument("--ore-weight", type=float, default=1.0,
                          help="resource_weights={ORE: this} for the labeler only (see "
                               "agents/heuristic.py) -- opponent seats stay unweighted.")
-    parser.add_argument("--labeler", choices=["heuristic", "search", "rollout", "rollout-override"], default="heuristic",
+    parser.add_argument("--labeler", choices=["heuristic", "search", "rollout", "rollout-override", "self"], default="heuristic",
                          help="'search' = lookahead expert (agents/search_heuristic.py); "
                               "'rollout' = expert iteration (search + determinized rollouts "
                               "with the checkpoint model as own-seat rollout policy)")

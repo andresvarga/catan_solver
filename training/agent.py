@@ -11,9 +11,8 @@ import random
 import torch
 
 from env.engine import acting_player, legal_actions
-from env.pettingzoo_env import build_observation
 from env.state import GameState
-from training.model import flatten_observation, observation_dim
+from training.model import encode_flat, observation_dim
 
 
 class HierarchicalLearnedAgent:
@@ -59,9 +58,8 @@ class HierarchicalLearnedAgent:
                                                public_hand_features=self.public_hand_features)
             obs_t = {k: torch.tensor(v, dtype=torch.float32).unsqueeze(0) for k, v in encoded.items()}
         else:
-            obs = build_observation(state, actor, actions, show_mask=True,
-                                     public_hand_features=self.public_hand_features)
-            obs_t = torch.tensor(flatten_observation(obs), dtype=torch.float32).unsqueeze(0)
+            obs_t = torch.tensor(encode_flat(state, actor, self.public_hand_features),
+                                 dtype=torch.float32).unsqueeze(0)
         with torch.inference_mode():
             action, *_ = self.model.act(obs_t, actions, deterministic=self.deterministic)
         return action

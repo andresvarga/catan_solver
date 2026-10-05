@@ -1,0 +1,108 @@
+{
+ "args": {
+  "model": "hier",
+  "hidden": 256,
+  "layers": 3,
+  "phf": false,
+  "envs": 16,
+  "episodes": 8,
+  "device": "cpu",
+  "opponents": "selfplay",
+  "alloc": false,
+  "out": "audit/results/perf/baseline_components_hier_envs16.json"
+ },
+ "wall": 4.520657452987507,
+ "transitions": 8164,
+ "env_steps": 11279,
+ "components": {
+  "obs: flatten_observation": {
+   "seconds": 0.8351820099633187,
+   "calls": 8164
+  },
+  "policy: trade bundle decode": {
+   "seconds": 0.7550795019051293,
+   "calls": 2698
+  },
+  "obs: build_observation (dict)": {
+   "seconds": 0.6350207985087764,
+   "calls": 11311
+  },
+  "policy: forward (head_logits_batch)": {
+   "seconds": 0.42761580704245716,
+   "calls": 2104
+  },
+  "engine.legal_actions": {
+   "seconds": 0.3548951988632325,
+   "calls": 19860
+  },
+  "policy: numpy sampling (sample_decision)": {
+   "seconds": 0.3305120334989624,
+   "calls": 8164
+  },
+  "obs: public beliefs": {
+   "seconds": 0.2554358342749765,
+   "calls": 45244
+  },
+  "env.step (bookkeeping)": {
+   "seconds": 0.1515321643964853,
+   "calls": 11311
+  },
+  "runner.advance (bookkeeping)": {
+   "seconds": 0.1300325613701716,
+   "calls": 8172
+  },
+  "policy: act_batch (python/glue)": {
+   "seconds": 0.1278116222092649,
+   "calls": 2104
+  },
+  "engine.step (rules)": {
+   "seconds": 0.11257557907083537,
+   "calls": 11279
+  },
+  "engine.is_legal_action (validation)": {
+   "seconds": 0.08816521217522677,
+   "calls": 13977
+  },
+  "policy: obs -> tensor": {
+   "seconds": 0.06624097323219758,
+   "calls": 2104
+  },
+  "env.last": {
+   "seconds": 0.061785469559254125,
+   "calls": 11311
+  },
+  "runner.apply (bookkeeping)": {
+   "seconds": 0.05201945130829699,
+   "calls": 8164
+  },
+  "obs: adapter.encode (glue)": {
+   "seconds": 0.039272279711440206,
+   "calls": 8164
+  },
+  "env.__init__": {
+   "seconds": 0.006841109017841518,
+   "calls": 8
+  },
+  "reset: new_game/generate_board": {
+   "seconds": 0.003788858972257003,
+   "calls": 8
+  },
+  "env.reset": {
+   "seconds": 0.00017034501070156693,
+   "calls": 8
+  },
+  "runner: opponent copies": {
+   "seconds": 1.990501186810434e-05,
+   "calls": 8
+  }
+ },
+ "gc": {
+  "collections": [
+   0,
+   13,
+   0
+  ],
+  "seconds": 4.253300721757114e-05
+ },
+ "top_alloc": []
+}
