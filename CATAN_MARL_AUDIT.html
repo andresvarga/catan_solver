@@ -306,17 +306,17 @@ Every confirmed bug has a strict-xfail test that reproduces it and will flip whe
 <tr>
 <td>Value-guided search (Phase 5)</td>
 <td><strong>Added</strong>: <code>agents/value_search.py</code> (policy top-k + determinized one-step lookahead scored by the value head); <code>vsearch:</code> eval spec</td>
-<td>Phase 5 (uncommitted)</td>
+<td><code>b5942fb</code></td>
 </tr>
 <tr>
 <td>Retraining pilot</td>
 <td><strong>Done</strong> (<code>runs/pilot_2026-10-04/RESULTS.md</code>): BC 19.1% -&gt; DAgger 28.6% [25.9, 31.5] vs 3 heuristics in ~13 min; four RL variants did not beat DAgger (mixed pool -2 to -3 pts, heuristic-only +0.0); critic cold start identified as the structural weakness; value-guided search harmful with the current critic (-18.5 pts)</td>
-<td>Phase 5 (uncommitted)</td>
+<td><code>b5942fb</code></td>
 </tr>
 <tr>
 <td>Critic options</td>
 <td><code>--value-init lstsq</code>, <code>--value-warmup-iters</code>; rollout pools retry once on a dead worker</td>
-<td>Phase 5 (uncommitted)</td>
+<td><code>b5942fb</code></td>
 </tr>
 <tr>
 <td><a class="fref" href="#f-12">F-12</a>, <a class="fref" href="#f-23">F-23</a>, <a class="fref" href="#f-28">F-28</a>, <a class="fref" href="#f-29">F-29</a></td>
