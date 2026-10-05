@@ -9,3 +9,5 @@ logs/
 audit/results/ckpts/
 audit/results/repro/
 audit/results/catan_rules_2020.*
+# training run outputs (durable, not versioned)
+runs/

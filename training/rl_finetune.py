@@ -50,6 +50,7 @@ from agents.opponent_pool import PooledOpponent, builtin_members, checkpoint_mem
 from env.state import NUM_PLAYERS
 from training.hier_ppo import (
     RotatingOpponents,
+    fit_value_head_lstsq,
     collect_rollout_parallel, compute_holdout_nll, load_bc_anchor, ppo_update,
 )
 from training.imitation_data import split_by_game
@@ -150,6 +151,15 @@ def main():
                          help="device for rollout inference: 'cpu' (forked workers) or 'cuda' "
                               "(spawned GPU workers; ~3-7x faster for the GNN, slower for the flat "
                               "model). With --num-workers 1 it runs in-process.")
+    parser.add_argument("--value-init", choices=["none", "lstsq"], default="none",
+                         help="'lstsq': before training, fit the value head in closed form (ridge "
+                              "regression of Monte-Carlo returns on frozen features) from "
+                              "--value-init-episodes episodes of the initial policy")
+    parser.add_argument("--value-init-episodes", type=int, default=192)
+    parser.add_argument("--value-warmup-iters", type=int, default=0,
+                         help="train only the value head for the first N iterations (the policy "
+                              "is frozen) so a cold critic's noisy advantages can't drag a cloned "
+                              "policy away from its demonstrations")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
@@ -230,6 +240,27 @@ def main():
         opponents = RotatingOpponents(partial(_heuristic_opponent))
     else:
         opponents = RotatingOpponents(partial(_pooled_opponent, pool_members))
+    if args.value_init == "lstsq":
+        t_vi = time.time()
+        n_fit = max(8, (args.value_init_episodes * 3 // 4 // 4) * 4)
+        n_hold = max(4, (args.value_init_episodes // 4 // 4) * 4)
+        vi_base = args.seed * 1_000_000 + 900_000  # inside this run's training seed range
+        check_training_seeds(vi_base, vi_base + n_fit + n_hold, "rl_finetune value init")
+
+        def mc_rollout(n, base):  # lam=1: Monte-Carlo returns, independent of the critic
+            trs, _ = collect_rollout_parallel(
+                env_kwargs, model, n, base, args.num_workers, opponent_agents=opponents,
+                opponent_name=args.opponent_pool, adapter=adapter, gamma=args.gamma, lam=1.0,
+                envs_per_worker=args.envs_per_worker, inference_device=args.rollout_device)
+            return trs
+
+        fit, hold = mc_rollout(n_fit, vi_base), mc_rollout(n_hold, vi_base + n_fit)
+        res = fit_value_head_lstsq(model, fit, hold, adapter, device=device)
+        model.to("cpu").eval()
+        print(f"value init (lstsq): {n_fit} fit / {n_hold} held-out episodes "
+              f"({res['fit_rows']} / {res['heldout_rows']} rows), held-out explained variance "
+              f"{res['ev_before']:.2f} -> {res['ev_after']:.2f} ({time.time() - t_vi:.0f}s)", flush=True)
+
     for it in range(1, args.iterations + 1):
         t0 = time.time()
         finished = wins = 0
@@ -257,7 +288,8 @@ def main():
                             minibatch_size=args.minibatch_size, device=device,
                             adapter=adapter, target_kl=args.target_kl,
                             bc_dataset=bc_anchor, bc_coef=args.bc_anchor_coef,
-                            bc_minibatch_size=args.bc_anchor_minibatch)
+                            bc_minibatch_size=args.bc_anchor_minibatch,
+                            train_policy=it > args.value_warmup_iters)
         nll = compute_holdout_nll(model, holdout, batch_size=1024) \
             if holdout is not None else float("nan")
         model.to("cpu").eval()

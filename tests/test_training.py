@@ -154,3 +154,44 @@ def test_parallel_rollouts_reproduce_sequential_exactly():
         assert sig(seq) == sig(par2) == sig(par3) == sig(bat1) == sig(bat2) and len(seq) > 100
         for other in (par2, par3, bat1, bat2):
             assert close_logprobs(seq, other)
+
+
+def test_value_warmup_updates_only_the_value_head():
+    """--value-warmup-iters: a cold critic is fitted to real returns without
+    moving the (cloned) policy -- not even through the shared trunk."""
+    import torch
+    from training.hier_model import HierarchicalActorCritic
+    from training.hier_ppo import collect_rollout, ppo_update
+
+    torch.manual_seed(0)
+    model = HierarchicalActorCritic(observation_dim(), 32)
+    trs, _ = collect_rollout(CatanAECEnv(max_episode_steps=400), model, "cpu", 2, 900)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    ppo_update(model, torch.optim.Adam(model.parameters(), 1e-3), trs, train_policy=False)
+    changed = {k.split(".")[0] for k in before if not torch.equal(before[k], model.state_dict()[k])}
+    assert changed == {"value_head"}
+
+
+def test_lstsq_value_init_improves_heldout_fit():
+    import torch
+    from training.hier_model import HierarchicalActorCritic
+    from training.hier_ppo import collect_rollout, fit_value_head_lstsq
+    from training.model_adapters import FLAT_ADAPTER
+
+    import random
+    from agents.heuristic import HeuristicAgent
+
+    torch.manual_seed(0)
+    model = HierarchicalActorCritic(observation_dim(), 32).eval()
+    # heuristic opponents so games terminate: truncated episodes' "returns" would
+    # just be bootstraps of the untrained critic itself
+    opp = {p: HeuristicAgent(p, random.Random(p)) for p in (1, 2, 3)}
+    env = CatanAECEnv(max_episode_steps=6000)
+    fit, s_fit = collect_rollout(env, model, "cpu", 24, 950, opponent_agents=opp, lam=1.0)
+    hold, s_hold = collect_rollout(env, model, "cpu", 8, 990, opponent_agents=opp, lam=1.0)
+    assert not any(s["truncated"] for s in s_fit + s_hold)
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    res = fit_value_head_lstsq(model, fit, hold, FLAT_ADAPTER)
+    changed = {k.split(".")[0] for k in before if not torch.equal(before[k], model.state_dict()[k])}
+    assert changed == {"value_head"}
+    assert res["ev_after"] > max(res["ev_before"], 0.0)

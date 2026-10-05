@@ -89,6 +89,66 @@ def copy_state(state: GameState) -> GameState:
 CONTINUATION_TYPES = SEARCHABLE_MAIN - {ActionType.END_TURN, ActionType.BUY_DEV_CARD}
 
 
+def determinize(sim: GameState, me: int, rr: random.Random) -> None:
+    """Re-sample everything this seat cannot see, preserving all public
+    counts. Mutates `sim` (a copy) only."""
+
+    # Opponents' unplayed dev cards + the deck form one hidden pool.
+    # Redeal preserving each opponent's total and bought-this-turn count
+    # (both public), remainder becomes the deck (size preserved).
+    pool = list(sim.dev_card_deck)
+    opp_counts: dict[int, tuple[int, int]] = {}
+    for pid, p in sim.players.items():
+        if pid == me:
+            continue
+        opp_counts[pid] = (p.total_dev_cards(),
+                           sum(p.dev_cards_bought_this_turn.values()))
+        for card, k in p.dev_cards.items():
+            pool.extend([card] * k)
+        p.dev_cards = empty_dev_hand()
+        p.dev_cards_bought_this_turn = empty_dev_hand()
+    rr.shuffle(pool)
+    i = 0
+    for pid, (held, bought) in opp_counts.items():
+        p = sim.players[pid]
+        dealt = pool[i:i + held]
+        i += held
+        for card in dealt:
+            p.dev_cards[card] += 1
+        for card in dealt[:bought]:
+            p.dev_cards_bought_this_turn[card] += 1
+    sim.dev_card_deck = pool[i:]
+
+    # Opponents' resource hands: counts are public; composition is
+    # sampled around the engine's card-counting prior (integer part =
+    # publicly certain cards, remainder ~ fractional mass + uniform floor).
+    resources = list(Resource)
+    for pid, p in sim.players.items():
+        if pid == me:
+            continue
+        n = p.hand_size()
+        est = sim.public_resource_estimates.get(pid, {})
+        hand = empty_hand()
+        known = 0
+        for r in resources:
+            k = min(n - known, int(est.get(r, 0.0)))
+            hand[r] = k
+            known += k
+        weights = {r: (est.get(r, 0.0) - int(est.get(r, 0.0))) + 0.25
+                   for r in resources}
+        for _ in range(n - known):
+            total = sum(weights.values())
+            x = rr.random() * total
+            for r in resources:
+                x -= weights[r]
+                if x <= 0:
+                    hand[r] += 1
+                    break
+            else:
+                hand[resources[-1]] += 1
+        p.resources = hand
+
+
 class SearchHeuristicAgent(HeuristicAgent):
     def __init__(self, player_id: int, rng: random.Random | None = None,
                  resource_weights: dict | None = ORE_WEIGHT,
@@ -300,64 +360,7 @@ class RolloutSearchAgent(SearchHeuristicAgent):
 
     # -- determinization ------------------------------------------------------
     def _determinize(self, sim: GameState, rr: random.Random) -> None:
-        """Re-sample everything this seat cannot see, preserving all public
-        counts. Mutates `sim` (a copy) only."""
-        me = self.player_id
-
-        # Opponents' unplayed dev cards + the deck form one hidden pool.
-        # Redeal preserving each opponent's total and bought-this-turn count
-        # (both public), remainder becomes the deck (size preserved).
-        pool = list(sim.dev_card_deck)
-        opp_counts: dict[int, tuple[int, int]] = {}
-        for pid, p in sim.players.items():
-            if pid == me:
-                continue
-            opp_counts[pid] = (p.total_dev_cards(),
-                               sum(p.dev_cards_bought_this_turn.values()))
-            for card, k in p.dev_cards.items():
-                pool.extend([card] * k)
-            p.dev_cards = empty_dev_hand()
-            p.dev_cards_bought_this_turn = empty_dev_hand()
-        rr.shuffle(pool)
-        i = 0
-        for pid, (held, bought) in opp_counts.items():
-            p = sim.players[pid]
-            dealt = pool[i:i + held]
-            i += held
-            for card in dealt:
-                p.dev_cards[card] += 1
-            for card in dealt[:bought]:
-                p.dev_cards_bought_this_turn[card] += 1
-        sim.dev_card_deck = pool[i:]
-
-        # Opponents' resource hands: counts are public; composition is
-        # sampled around the engine's card-counting prior (integer part =
-        # publicly certain cards, remainder ~ fractional mass + uniform floor).
-        resources = list(Resource)
-        for pid, p in sim.players.items():
-            if pid == me:
-                continue
-            n = p.hand_size()
-            est = sim.public_resource_estimates.get(pid, {})
-            hand = empty_hand()
-            known = 0
-            for r in resources:
-                k = min(n - known, int(est.get(r, 0.0)))
-                hand[r] = k
-                known += k
-            weights = {r: (est.get(r, 0.0) - int(est.get(r, 0.0))) + 0.25
-                       for r in resources}
-            for _ in range(n - known):
-                total = sum(weights.values())
-                x = rr.random() * total
-                for r in resources:
-                    x -= weights[r]
-                    if x <= 0:
-                        hand[r] += 1
-                        break
-                else:
-                    hand[resources[-1]] += 1
-            p.resources = hand
+        determinize(sim, self.player_id, rr)
 
     # -- rollout --------------------------------------------------------------
     def _rollout_value(self, state: GameState, action: Action, seed: int) -> float:

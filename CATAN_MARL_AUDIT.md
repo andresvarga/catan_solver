@@ -54,6 +54,9 @@ The findings below describe the code **as audited** (`6e6949a`). Since then:
 | F-27 bank/deck not observed | **Fixed**: bank stock and dev-deck size in both encoders (leakage test updated: the supply is public) | `a1f5a68` |
 | Belief features (Phase 5) | **Added**: expected hidden VP cards / knights per opponent from public counts + own hand, age of last dev purchase, last trade offer per player (`env/public_beliefs.py`) | `a1f5a68` |
 | rl_finetune pool-per-seat overhead | **Fixed**: one rollout call per iteration (`RotatingOpponents`) | `a1f5a68` |
+| Value-guided search (Phase 5) | **Added**: `agents/value_search.py` (policy top-k + determinized one-step lookahead scored by the value head); `vsearch:` eval spec | Phase 5 (uncommitted) |
+| Retraining pilot | **Done** (`runs/pilot_2026-10-04/RESULTS.md`): BC 19.1% -> DAgger 28.6% [25.9, 31.5] vs 3 heuristics in ~13 min; four RL variants did not beat DAgger (mixed pool -2 to -3 pts, heuristic-only +0.0); critic cold start identified as the structural weakness; value-guided search harmful with the current critic (-18.5 pts) | Phase 5 (uncommitted) |
+| Critic options | `--value-init lstsq`, `--value-warmup-iters`; rollout pools retry once on a dead worker | Phase 5 (uncommitted) |
 | F-12, F-23, F-28, F-29 | Open | — |
 
 ## Executive Summary

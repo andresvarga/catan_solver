@@ -29,6 +29,7 @@ import multiprocessing as mp
 import os
 import random
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
 import torch
@@ -393,10 +394,21 @@ def collect_rollout_parallel(env_kwargs: dict, model,
     # concurrent.futures rather than multiprocessing.Pool: a worker that dies
     # (e.g. failing to initialize) raises BrokenProcessPool instead of being
     # silently respawned forever.
-    with ProcessPoolExecutor(max_workers=len(chunks), mp_context=ctx, initializer=_init_worker,
-                             initargs=(worker_model, env_kwargs, opponent_agents, opponent_name, adapter,
-                                       gamma, lam, envs_per_worker, inference_device)) as pool:
-        results = list(pool.map(_worker_collect, chunks))
+    for attempt in range(3):
+        try:
+            with ProcessPoolExecutor(max_workers=len(chunks), mp_context=ctx, initializer=_init_worker,
+                                     initargs=(worker_model, env_kwargs, opponent_agents, opponent_name,
+                                               adapter, gamma, lam, envs_per_worker,
+                                               inference_device)) as pool:
+                results = list(pool.map(_worker_collect, chunks))
+            break
+        except BrokenProcessPool:
+            # A worker died abruptly (seen once: a PyTorch-internal clock
+            # assertion in a spawned CUDA worker). Rollouts are a pure function
+            # of (weights, seeds), so retrying yields identical data.
+            if attempt == 2:
+                raise
+            print(f"rollout worker pool broke; retrying ({attempt + 1}/2)", flush=True)
     return _assemble(ep for chunk in results for ep in chunk)
 
 
@@ -458,7 +470,7 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
                device: str = "cpu", adapter: ModelAdapter = FLAT_ADAPTER,
                target_kl: float | None = 0.02,
                bc_dataset: dict[str, torch.Tensor] | None = None, bc_coef: float = 0.0,
-               bc_minibatch_size: int = 512) -> dict:
+               bc_minibatch_size: int = 512, train_policy: bool = True) -> dict:
     """`bc_dataset`/`bc_coef`: optional BC anchor (see `load_bc_anchor`).
     Each gradient step adds `bc_coef * NLL(demonstrated actions)` on a fresh
     random demo minibatch. Near the BC optimum this gradient is ~zero, and it
@@ -511,9 +523,14 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
             policy_loss = -torch.min(surr1, surr2).mean()
             value_loss = ((value - ret) ** 2).mean()
             entropy_loss = -entropy.mean()
-            loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
+            if train_policy:
+                loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
+            else:
+                # critic warm-up: fit V to real returns before its advantages
+                # are allowed to move the (cloned) policy
+                loss = value_coef * value_loss
 
-            if use_bc:
+            if use_bc and train_policy:
                 demo_idx = torch.randint(n_demo, (min(bc_minibatch_size, n_demo),), device=device)
                 demo_tb = {k: v[demo_idx] for k, v in bc_dataset.items() if k != "obs"}
                 demo_logprob, _, _ = model.evaluate_actions(
@@ -524,6 +541,12 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
 
             optimizer.zero_grad()
             loss.backward()
+            if not train_policy:
+                # warm-up touches only the value head: gradients into the
+                # shared trunk would shift the policy's outputs too
+                for name, p in model.named_parameters():
+                    if not name.startswith("value_head"):
+                        p.grad = None
             grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)  # pre-clip norm
             optimizer.step()
             stats["grad_norm"].append(float(grad_norm))
@@ -544,7 +567,7 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
         if target_kl is not None and abs(float(np.mean(epoch_kls))) > target_kl:
             break
 
-    out = {k: float(np.mean(v)) for k, v in stats.items()}
+    out = {k: float(np.mean(v)) for k, v in stats.items() if v}
     # Explained variance of the rollout's value predictions w.r.t. their GAE
     # return targets: ~0 means the critic explains nothing, 1 is perfect.
     values = np.array([t["value"] for t in transitions], dtype=np.float64)
@@ -552,3 +575,50 @@ def ppo_update(model, optimizer: torch.optim.Optimizer, transitions: list[dict],
     var = returns.var()
     out["explained_variance"] = float(1.0 - (returns - values).var() / var) if var > 1e-12 else float("nan")
     return out
+
+
+def fit_value_head_lstsq(model, fit_transitions: list[dict], heldout_transitions: list[dict],
+                         adapter: ModelAdapter, device: str = "cpu", ridge: float = 0.3,
+                         batch_size: int = 2048) -> dict:
+    """Closed-form critic initialisation: ridge regression of Monte-Carlo
+    returns (compute transitions with lam=1.0 so targets don't depend on the
+    untrained critic) onto the frozen trunk features, written into
+    `model.value_head`. A cloned policy's critic otherwise starts with
+    negative explained variance, and its noisy advantages drag the policy
+    down for the first tens of iterations (pilot 2026-10-04). Returns
+    explained variance on `heldout_transitions` before and after."""
+    from training.imitation_data import model_features
+
+    def feats_and_targets(trs):
+        xs, ys = [], []
+        model.to(device).eval()
+        with torch.inference_mode():
+            for i in range(0, len(trs), batch_size):
+                chunk = trs[i:i + batch_size]
+                xs.append(model_features(model, adapter.to_batch([t["obs"] for t in chunk], device)).double().cpu())
+                ys.append(torch.tensor([t["return"] for t in chunk], dtype=torch.float64))
+        return torch.cat(xs), torch.cat(ys)
+
+    def ev(x, y):
+        with torch.inference_mode():
+            pred = model.value_head(x.to(device=device, dtype=torch.float32)).squeeze(-1).double().cpu()
+        return float(1 - (y - pred).var() / y.var()) if y.var() > 0 else float("nan")
+
+    x_fit, y_fit = feats_and_targets(fit_transitions)
+    x_hold, y_hold = feats_and_targets(heldout_transitions)
+    before = ev(x_hold, y_hold)
+    xa = torch.cat([x_fit, torch.ones(len(x_fit), 1, dtype=torch.float64)], dim=1)
+    # Ridge strength relative to the feature scale (lambda = ridge * mean
+    # diagonal of X^T X): returns are nearly constant within a player's game,
+    # so a weakly-regularised fit memorises trajectories and extrapolates
+    # wildly on held-out games.
+    gram = xa.T @ xa
+    lam = ridge * float(torch.diagonal(gram)[:-1].mean())
+    reg = lam * torch.eye(xa.shape[1], dtype=torch.float64)
+    reg[-1, -1] = 0.0  # don't shrink the bias
+    w = torch.linalg.solve(gram + reg, xa.T @ y_fit)
+    with torch.no_grad():
+        model.value_head.weight.copy_(w[:-1].to(model.value_head.weight.dtype).view(1, -1))
+        model.value_head.bias.copy_(w[-1:].to(model.value_head.bias.dtype))
+    return {"ev_before": before, "ev_after": ev(x_hold, y_hold),
+            "fit_rows": len(x_fit), "heldout_rows": len(x_hold)}

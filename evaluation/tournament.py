@@ -13,6 +13,8 @@ Agent specs:
     ckpt:<hier|gnn>:<path>[:hidden[:gnn_layers]][:phf]     (deterministic)
     ckpt-sample:...                                          (sampled actions)
     untrained:<hier|gnn>:<torch seed>
+    vsearch:<top_k>:<n_det>:<ckpt spec>   value-guided decision-time search
+                                           (agents/value_search.py) around a checkpoint
 """
 from __future__ import annotations
 
@@ -96,6 +98,12 @@ def make_agent(spec: str, pid: int, seed: int):
     if spec == "search":
         from agents.search_heuristic import SearchHeuristicAgent
         return SearchHeuristicAgent(pid, rng)
+    if spec.startswith("vsearch:"):
+        from agents.value_search import ValueSearchAgent
+        _, k, d, inner = spec.split(":", 3)
+        c = _parse_ckpt(inner)
+        return ValueSearchAgent(pid, rng, model=_model_for(inner), model_kind=c.kind,
+                                public_hand_features=c.phf, top_k=int(k), n_det=int(d))
     if spec.startswith(("ckpt:", "ckpt-sample:", "untrained:")):
         from training.agent import HierarchicalLearnedAgent
         model = _model_for(spec)
@@ -138,6 +146,8 @@ def run_matchup(cand: str, opp: str, seeds: list[int], workers: int = 8) -> list
     """Candidate vs 3x `opp` on every seed from every seat. Model specs are
     loaded once in the parent so forked workers share them copy-on-write."""
     for spec in (cand, opp):
+        if spec.startswith("vsearch:"):
+            spec = spec.split(":", 3)[3]
         if spec.startswith(("ckpt:", "ckpt-sample:", "untrained:")):
             _model_for(spec)
     jobs = [(seed, seat, cand, opp) for seed in seeds for seat in range(NUM_PLAYERS)]

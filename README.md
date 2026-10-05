@@ -59,6 +59,11 @@ Python/env overhead anyway (GPU wouldn't help there).
   `env.step(action)` as an `Action`, validated by `engine.is_legal_action`.
 - `agents/random_agent.py` — legal-action agent (function + `RandomAgent`
   class) for smoke testing and as the evaluation-tier floor.
+- `agents/value_search.py` — `ValueSearchAgent`: decision-time search around a
+  trained checkpoint. At MAIN decisions it takes the policy's top-k actions,
+  determinizes hidden information from public knowledge, applies each action
+  and scores the result with the value head (won positions score +1).
+  Evaluate it as `vsearch:<k>:<n_det>:ckpt:...` in `scripts/evaluate_candidate.py`.
 - `agents/heuristic.py` — greedy-expansion + needs-based trade agent
   (roadmap phase 3): production-value settlement/city placement, a 2-hop
   BFS road-targeting heuristic, priority-ordered build/dev-card decisions,
@@ -115,7 +120,12 @@ Python/env overhead anyway (GPU wouldn't help there).
   (`agents/opponent_pool.py`: heuristic, honest heuristic, search agent,
   random, optional past checkpoints via `--pool-checkpoint`), or 3 plain
   heuristics with `--opponent-pool heuristic`. In-loop evaluation is
-  seat-rotated vs 3 heuristics with Wilson CIs.
+  seat-rotated vs 3 heuristics with Wilson CIs. Critic cold-start options:
+  `--value-init lstsq` (closed-form ridge fit of the value head on
+  Monte-Carlo returns) and `--value-warmup-iters N` (value head only, policy
+  frozen). The 2026-10-04 pilot (`runs/pilot_2026-10-04/RESULTS.md`) found
+  neither lifts a cloned policy's critic far enough -- its trunk features
+  don't encode returns -- so a separate critic network is the next step.
 - Rewards: games pay **+1 to the winner and -1/3 to each loser** by default
   (`--terminal-reward win_loss`; legacy placement reward via `rank`). A
   step-cap truncation pays nothing and GAE bootstraps V(s_T). Every run
