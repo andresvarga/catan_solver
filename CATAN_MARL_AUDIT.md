@@ -49,7 +49,12 @@ The findings below describe the code **as audited** (`6e6949a`). Since then:
 | F-21 BC split by row | **Fixed**: datasets record `game_id`; BC validation and the RL anchor holdout hold out whole games | `a686c21` |
 | F-25 GNN rollout throughput | **Fixed**: batched multi-game rollouts + NumPy sampling + spawned GPU inference workers; GNN 256x4 ~520 -> ~3,570 transitions/s, flat model ~5,000 -> ~13,850 (see README "Rollout throughput") | `88a7f59` |
 | Enum-keyed dicts | Identity `__hash__` on the hot enums (dict lookups 2x faster); full int-array rewrite measured not worthwhile (~3% end-to-end) | `88a7f59` |
-| F-12, F-23, F-24, F-26–F-29 | Open | — |
+| F-24 dangerous CLI defaults | **Fixed**: random boards by default in `train_hier`/`league_train` (`--no-randomize-board` for the fixed board); step caps 4000 since `537a79a` | roadmap Phase 5 prep |
+| F-26 flat model absolute seats | **Fixed**: `flatten_observation` is fully observer-relative (ownership, per-player rows, holders, trade parties) | roadmap Phase 5 prep |
+| F-27 bank/deck not observed | **Fixed**: bank stock and dev-deck size in both encoders (leakage test updated: the supply is public) | roadmap Phase 5 prep |
+| Belief features (Phase 5) | **Added**: expected hidden VP cards / knights per opponent from public counts + own hand, age of last dev purchase, last trade offer per player (`env/public_beliefs.py`) | roadmap Phase 5 prep |
+| rl_finetune pool-per-seat overhead | **Fixed**: one rollout call per iteration (`RotatingOpponents`) | roadmap Phase 5 prep |
+| F-12, F-23, F-28, F-29 | Open | — |
 
 ## Executive Summary
 

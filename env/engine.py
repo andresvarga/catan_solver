@@ -836,12 +836,14 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
         card = state.dev_card_deck.pop()
         state.players[actor].dev_cards[card] += 1
         state.players[actor].dev_cards_bought_this_turn[card] += 1
+        state.players[actor].last_dev_purchase_turn = state.turn_number
         check_win(state)
         return
 
     if t == ActionType.PLAY_KNIGHT:
         player = state.players[actor]
         player.dev_cards[DevCard.KNIGHT] -= 1
+        player.dev_cards_played[DevCard.KNIGHT] += 1
         player.played_dev_card_this_turn = True
         award_knight(state, actor)
         _apply_move_robber(state, actor, p["hex_id"], p["victim"], rng)
@@ -851,6 +853,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
     if t == ActionType.PLAY_ROAD_BUILDING:
         player = state.players[actor]
         player.dev_cards[DevCard.ROAD_BUILDING] -= 1
+        player.dev_cards_played[DevCard.ROAD_BUILDING] += 1
         player.played_dev_card_this_turn = True
         state.free_roads_remaining = 2
         _settle_free_roads(state, actor)
@@ -859,6 +862,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
     if t == ActionType.PLAY_YEAR_OF_PLENTY:
         player = state.players[actor]
         player.dev_cards[DevCard.YEAR_OF_PLENTY] -= 1
+        player.dev_cards_played[DevCard.YEAR_OF_PLENTY] += 1
         player.played_dev_card_this_turn = True
         for r in p["resources"]:
             player.resources[r] += 1
@@ -869,6 +873,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
     if t == ActionType.PLAY_MONOPOLY:
         player = state.players[actor]
         player.dev_cards[DevCard.MONOPOLY] -= 1
+        player.dev_cards_played[DevCard.MONOPOLY] += 1
         player.played_dev_card_this_turn = True
         r = p["resource"]
         for other_id, other in state.players.items():
@@ -904,6 +909,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
 
     if t == ActionType.PROPOSE_TRADE:
         state.trades_proposed_this_turn += 1
+        state.last_trade_offer[actor] = (dict(p["give"]), dict(p["want"]), state.turn_number)
         state.pending_trade = TradeOffer(proposer=actor, give=dict(p["give"]), want=dict(p["want"]),
                                           targets=list(p["targets"]))
         state.trade_targets_remaining = list(p["targets"])
@@ -944,6 +950,7 @@ def step(state: GameState, action: Action, rng: random.Random | None = None) -> 
 
     if t == ActionType.COUNTER_TRADE:
         offer = state.pending_trade
+        state.last_trade_offer[actor] = (dict(p["give"]), dict(p["want"]), state.turn_number)
         state.trade_counter_context = TradeOffer(proposer=actor, give=p["give"], want=p["want"],
                                                   targets=[offer.proposer], round=offer.round + 1)
         state.trade_targets_remaining.pop(0)

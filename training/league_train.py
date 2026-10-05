@@ -342,7 +342,8 @@ def main():
     parser.add_argument("--vp-shaping-weight", type=float, default=0.05)
     parser.add_argument("--no-trading", action="store_true")
     parser.add_argument("--no-dev-cards", action="store_true")
-    parser.add_argument("--randomize-board", action="store_true", default=True)
+    parser.add_argument("--randomize-board", action=argparse.BooleanOptionalAction, default=True,
+                         help="random board per game (default); --no-randomize-board for the fixed board")
     parser.add_argument("--public-hand-features", action="store_true",
                          help="expose the engine's publicly-inferable per-player resource "
                               "estimates (card counting) as observation features. Widens the "

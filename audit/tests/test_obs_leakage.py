@@ -40,20 +40,24 @@ def mid_game_states(n=40, seed0=13_000_000):
 def scramble_hidden(state, observer: int, rng: random.Random):
     """Re-deal everything `observer` cannot see, preserving all public counts."""
     s = copy.deepcopy(state)
-    # opponent resource identities (hand sizes public)
-    for pid, p in s.players.items():
-        if pid == observer:
-            continue
-        n = p.hand_size()
-        pool = []
+    # opponent resource identities: hand sizes are public, and so is the bank
+    # (the supply stacks are face-up), hence the opponents' *combined* holding
+    # of each resource. What stays hidden is how those cards are split among
+    # the opponents -- re-deal exactly that.
+    opps = [pid for pid in s.players if pid != observer]
+    pool = []
+    for pid in opps:
+        p = s.players[pid]
         for r in RES:
-            pool += [r] * (p.resources[r] + s.bank[r])
-        # return hand to bank then redraw n cards
-        for r in RES:
-            s.bank[r] += p.resources[r]; p.resources[r] = 0
-        rng.shuffle(pool)
-        for r in pool[:n]:
-            p.resources[r] += 1; s.bank[r] -= 1
+            pool += [r] * p.resources[r]
+            p.resources[r] = 0
+    rng.shuffle(pool)
+    i = 0
+    for pid in opps:
+        n = state.players[pid].hand_size()
+        for r in pool[i:i + n]:
+            s.players[pid].resources[r] += 1
+        i += n
     # opponent dev-card identities + deck order (counts public)
     pool = list(s.dev_card_deck)
     counts = {}

@@ -39,6 +39,7 @@ import argparse
 import os
 import random
 import time
+from functools import partial
 
 import numpy as np
 import torch
@@ -48,6 +49,7 @@ from agents.heuristic import HeuristicAgent
 from agents.opponent_pool import PooledOpponent, builtin_members, checkpoint_member
 from env.state import NUM_PLAYERS
 from training.hier_ppo import (
+    RotatingOpponents,
     collect_rollout_parallel, compute_holdout_nll, load_bc_anchor, ppo_update,
 )
 from training.imitation_data import split_by_game
@@ -55,6 +57,15 @@ from training.model_adapters import ADAPTERS
 from training.run_manifest import write_manifest
 from training.ppo import GAE_LAMBDA, GAMMA
 from training.train_hier import build_model, evaluate_policy, wilson_ci
+
+
+def _heuristic_opponent(pid: int):
+    # rng is re-seeded per episode by hier_ppo._episode_opponents
+    return HeuristicAgent(pid, random.Random(pid))
+
+
+def _pooled_opponent(members, pid: int):
+    return PooledOpponent(pid, members, random.Random(pid))
 
 
 def fixed_seed_eval(model, games_per_set: int, num_workers: int,
@@ -209,37 +220,34 @@ def main():
     best_win = win0
     history = [(0, win0, vp0)]
 
-    per_seat = max(1, args.episodes_per_iter // NUM_PLAYERS)
-    check_training_seeds(args.seed * 1_000_000,
-                         args.seed * 1_000_000 + args.iterations * 1_000 + 3 * 250 + per_seat,
+    # one rollout call per iteration covering all four trainee seats: the
+    # trainee sits in seat seed % 4 (RotatingOpponents), so a multiple-of-4
+    # episode count is exactly seat-balanced
+    n_ep = max(NUM_PLAYERS, (args.episodes_per_iter // NUM_PLAYERS) * NUM_PLAYERS)
+    check_training_seeds(args.seed * 1_000_000, args.seed * 1_000_000 + args.iterations * 1_000 + n_ep,
                          "rl_finetune rollout")
+    if pool_members is None:  # legacy: 3x the evaluation heuristic
+        opponents = RotatingOpponents(partial(_heuristic_opponent))
+    else:
+        opponents = RotatingOpponents(partial(_pooled_opponent, pool_members))
     for it in range(1, args.iterations + 1):
         t0 = time.time()
-        transitions = []
         finished = wins = 0
         style_games: dict[str, int] = {}
         style_wins: dict[str, int] = {}
-        for seat in range(NUM_PLAYERS):
-            if pool_members is None:  # legacy: 3x the evaluation heuristic
-                opponents = {pid: HeuristicAgent(pid, random.Random(args.seed * 917 + it * 31 + pid))
-                             for pid in range(NUM_PLAYERS) if pid != seat}
-            else:
-                opponents = {pid: PooledOpponent(pid, pool_members,
-                                                 random.Random(args.seed * 917 + it * 31 + pid))
-                             for pid in range(NUM_PLAYERS) if pid != seat}
-            base_seed = args.seed * 1_000_000 + it * 1_000 + seat * 250
-            trs, summaries = collect_rollout_parallel(
-                env_kwargs, model, per_seat, base_seed, args.num_workers,
-                opponent_agents=opponents, opponent_name=args.opponent_pool, adapter=adapter,
-                gamma=args.gamma, lam=args.gae_lambda,
-                envs_per_worker=args.envs_per_worker, inference_device=args.rollout_device)
-            transitions.extend(trs)
-            for s in summaries:
-                finished += 0 if s["truncated"] else 1
-                wins += 1 if s["winner"] == seat else 0
-                for style in set(s.get("opponent_styles", {}).values()):
-                    style_games[style] = style_games.get(style, 0) + 1
-                    style_wins[style] = style_wins.get(style, 0) + (s["winner"] == seat)
+        base_seed = args.seed * 1_000_000 + it * 1_000
+        transitions, summaries = collect_rollout_parallel(
+            env_kwargs, model, n_ep, base_seed, args.num_workers,
+            opponent_agents=opponents, opponent_name=args.opponent_pool, adapter=adapter,
+            gamma=args.gamma, lam=args.gae_lambda,
+            envs_per_worker=args.envs_per_worker, inference_device=args.rollout_device)
+        for s in summaries:
+            seat = s["trainee_pids"][0]
+            finished += 0 if s["truncated"] else 1
+            wins += 1 if s["winner"] == seat else 0
+            for style in set(s.get("opponent_styles", {}).values()):
+                style_games[style] = style_games.get(style, 0) + 1
+                style_wins[style] = style_wins.get(style, 0) + (s["winner"] == seat)
         t_roll = time.time() - t0
 
         model.to(device).train()
@@ -254,7 +262,6 @@ def main():
             if holdout is not None else float("nan")
         model.to("cpu").eval()
 
-        n_ep = per_seat * NUM_PLAYERS
         bc_str = f" bc={stats['bc_loss']:.3f}" if "bc_loss" in stats else ""
         print(f"iter {it:3d}: {len(transitions)} transitions, rollout wins {wins}/{n_ep} "
               f"(finished {finished}/{n_ep}) | pi={stats['policy_loss']:.4f} "

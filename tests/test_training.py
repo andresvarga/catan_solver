@@ -47,9 +47,12 @@ def test_collect_episode_skips_forced_moves_and_bootstraps_truncation():
 
     torch.manual_seed(0)
     model = HierarchicalActorCritic(obs_dim=observation_dim(), hidden=32).eval()
-    for max_steps in (300, None):
-        env = CatanAECEnv(seed=11, max_episode_steps=max_steps, allow_trading=False)
-        data = collect_episode(env, model, "cpu", 11)
+    outcomes = set()
+    for seed, max_steps in ((11, 300), (11, 4000), (12, 4000), (13, 4000)):
+        env = CatanAECEnv(seed=seed, max_episode_steps=max_steps, allow_trading=False)
+        data = collect_episode(env, model, "cpu", seed)
+        terminated = env.engine.state.phase.name == "GAME_OVER"
+        outcomes.add(terminated)
         rewards_seen = {a: 0.0 for a in env.possible_agents}
         for agent, trs in data.items():
             assert trs and trs[-1]["done"] and not any(t["done"] for t in trs[:-1])
@@ -60,14 +63,16 @@ def test_collect_episode_skips_forced_moves_and_bootstraps_truncation():
                            or (t["stage2_head"] is not None and t["sub_mask_2"].sum() > 1))
                 assert choices
                 rewards_seen[agent] += t["reward"]
-            if max_steps is not None:
-                assert trs[-1]["truncated"] and "bootstrap_value" in trs[-1]
-            else:
+            if terminated:
                 assert trs[-1]["terminated"] and "bootstrap_value" not in trs[-1]
-        if max_steps is None:  # forced-move rewards are folded in, not dropped
-            assert abs(sum(rewards_seen.values())) < 1e-6  # win/loss reward is zero-sum
+            else:
+                assert trs[-1]["truncated"] and "bootstrap_value" in trs[-1]
+        if terminated:  # forced-move rewards are folded in, not dropped; win/loss is zero-sum
+            assert abs(sum(rewards_seen.values())) < 1e-6
+            assert max(rewards_seen.values()) == 1.0
         else:
             assert all(v == 0.0 for v in rewards_seen.values())
+    assert False in outcomes  # the 300-step run truncates
 
 
 def test_flatten_observation_matches_observation_dim():

@@ -78,6 +78,10 @@ class PlayerState:
     cities: list[int] = field(default_factory=list)  # vertex ids
     roads: list[int] = field(default_factory=list)  # edge ids
     knights_played: int = 0
+    # Public dev-card history (every play is announced; purchases are seen):
+    # per-type play counts and the turn of the most recent purchase.
+    dev_cards_played: dict[DevCard, int] = field(default_factory=empty_dev_hand)
+    last_dev_purchase_turn: int = -1
     played_dev_card_this_turn: bool = False
     has_rolled_this_turn: bool = False
 
@@ -142,6 +146,9 @@ class GameState:
     trade_accepted: list[int] = field(default_factory=list)
     trade_counter_context: TradeOffer | None = None
     trades_proposed_this_turn: int = 0
+    # Most recent public trade offer per player (proposal or counter):
+    # pid -> (give, want, turn_number). Offers reveal what a player needs.
+    last_trade_offer: dict[int, tuple[dict, dict, int]] = field(default_factory=dict)
     free_roads_remaining: int = 0
     winner: int | None = None
     turn_log: list[str] = field(default_factory=list)

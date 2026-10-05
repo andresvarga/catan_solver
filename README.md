@@ -42,6 +42,12 @@ Python/env overhead anyway (GPU wouldn't help there).
   compatible across runs with the same setting — train an A/B pair to
   measure its effect on robber targeting and trade evaluation.
 - `env/actions.py` — the action-type inventory.
+- `env/public_beliefs.py` — belief features computable from public
+  information + the observer's own hand: expected hidden VP cards and knights
+  per opponent (known deck composition minus announced plays and own cards),
+  age of each player's last dev-card purchase, each player's last trade offer.
+  Both observation encoders include them, plus the bank stock and deck size
+  (the supply is public), and every seat reference is observer-relative.
 - `env/pettingzoo_env.py` — PettingZoo AEC wrapper (`CatanAECEnv`) with a
   structured `Dict` observation and a masked `Discrete(400)` action space
   (index into the current legal-action list — see the module docstring for

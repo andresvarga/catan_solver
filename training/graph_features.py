@@ -14,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from env.board import HEX_TO_RESOURCE, PIP_COUNT, HexType, Resource
+from env.public_beliefs import expected_dev_cards, last_offer, turns_since_dev_purchase
 from env.state import DevCard, GameState, MAX_TRADE_PROPOSALS_PER_TURN, Phase
 
 RESOURCE_LIST = list(Resource)
@@ -27,14 +28,18 @@ HEX_FEAT_DIM = 9       # 6 terrain one-hot + number/12 + pips/5 + robber flag
 VERTEX_FEAT_DIM = 15   # 5 owner-relative one-hot + 3 type one-hot + port_generic + 6 port-resource one-hot
 EDGE_FEAT_DIM = 5      # 5 owner-relative one-hot
 PLAYER_FEAT_DIM = 23
-OPPONENT_FEAT_DIM = 9
+# 9 public basics + 14 belief/history features (env/public_beliefs.py):
+# expected hidden VP cards, expected knights, age of last dev purchase,
+# last trade offer give(5)/want(5) and its age
+OPPONENT_FEAT_DIM = 23
 # Appended per opponent row when `public_hand_features` is on: the engine's
 # publicly-inferable resource estimate (5) + unknown-identity card count (1).
 PUBLIC_HAND_FEAT_DIM = 6
 NUM_OPPONENTS = 3
 # phase(8) dice(2) | pending give/want(10) + proposer(5) | counter give/want(10) + proposer(5)
 # | pending targets, relative seats me/+1/+2/+3 (4) | proposals used this turn (1)
-CONTEXT_FEAT_DIM = 45
+# | bank stock (5) | dev deck size (1)
+CONTEXT_FEAT_DIM = 51
 SELF_ID_DIM = 4  # one-hot of the observing player's absolute seat (0-3)
 
 
@@ -152,13 +157,22 @@ def build_graph_observation(state: GameState, pid: int,
         row[6] = p.total_dev_cards() / 25.0
         row[7] = 1.0 if state.longest_road_holder == opp_pid else 0.0
         row[8] = 1.0 if state.largest_army_holder == opp_pid else 0.0
+        exp = expected_dev_cards(state, pid, opp_pid)
+        row[9] = exp[DevCard.VICTORY_POINT] / 5.0
+        row[10] = exp[DevCard.KNIGHT] / 14.0
+        row[11] = turns_since_dev_purchase(state, opp_pid)
+        give, want, age = last_offer(state, opp_pid)
+        for i, r in enumerate(RESOURCE_LIST):
+            row[12 + i] = give.get(r, 0) / 3.0
+            row[17 + i] = want.get(r, 0) / 3.0
+        row[22] = age
         if public_hand_features:
             est = state.public_resource_estimates[opp_pid]
             identified = 0.0
             for i, r in enumerate(RESOURCE_LIST):
-                row[9 + i] = est[r] / 19.0
+                row[OPPONENT_FEAT_DIM + i] = est[r] / 19.0
                 identified += est[r]
-            row[14] = max(0.0, p.hand_size() - identified) / 40.0  # unknown-identity cards
+            row[OPPONENT_FEAT_DIM + 5] = max(0.0, p.hand_size() - identified) / 40.0  # unknown-identity cards
 
     context_features = np.zeros(CONTEXT_FEAT_DIM, dtype=np.float32)
     context_features[PHASE_INDEX[state.phase]] = 1.0
@@ -187,6 +201,9 @@ def build_graph_observation(state: GameState, pid: int,
         for t in state.pending_trade.targets:
             context_features[40 + (t - pid) % 4] = 1.0
     context_features[44] = state.trades_proposed_this_turn / MAX_TRADE_PROPOSALS_PER_TURN
+    for i, r in enumerate(RESOURCE_LIST):
+        context_features[45 + i] = state.bank[r] / 19.0  # the supply is public
+    context_features[50] = len(state.dev_card_deck) / 25.0
 
     # Absolute seat of the observing player -- used only as a deterministic
     # index (never a learned input) to map the GNN's seat-relative opponent

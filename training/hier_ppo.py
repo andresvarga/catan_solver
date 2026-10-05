@@ -41,10 +41,28 @@ from training.model_adapters import FLAT_ADAPTER, ModelAdapter
 from training.ppo import GAE_LAMBDA, GAMMA, compute_gae
 
 
-def _episode_opponents(opponent_agents: dict[int, object] | None, seed: int) -> dict[int, object]:
+class RotatingOpponents:
+    """`opponent_agents` that depends on the episode seed: the trainee sits in
+    seat `seed % 4` and every other seat gets `make_opponent(pid)`. Lets one
+    rollout call cover all four trainee seats (one worker pool per
+    iteration instead of four). Picklable if `make_opponent` is."""
+
+    def __init__(self, make_opponent):
+        self.make_opponent = make_opponent
+
+    def __call__(self, seed: int) -> dict[int, object]:
+        trainee = seed % 4
+        return {pid: self.make_opponent(pid) for pid in range(4) if pid != trainee}
+
+
+def _episode_opponents(opponent_agents, seed: int) -> dict[int, object]:
     """Per-episode opponent instances seeded from the episode seed. Shallow
     copies (models and pool members stay shared) with fresh RNG state, so
-    episodes running concurrently in one process never share an RNG stream."""
+    episodes running concurrently in one process never share an RNG stream.
+    `opponent_agents` is a {seat: agent} dict, None, or a callable
+    seed -> dict (e.g. RotatingOpponents)."""
+    if callable(opponent_agents):
+        opponent_agents = opponent_agents(seed)
     out = {}
     for seat, agent in (opponent_agents or {}).items():
         a = copy.copy(agent)
@@ -301,7 +319,7 @@ def reseed_forked_worker(opponent_agents: dict[int, object] | None = None) -> No
     at pool creation)."""
     pid_salt = os.getpid() * 0x9E3779B1
     torch.manual_seed((torch.initial_seed() ^ pid_salt) % (2 ** 63))
-    if opponent_agents:
+    if opponent_agents and not callable(opponent_agents):  # callables build fresh, seeded agents per episode
         for seat, agent in opponent_agents.items():
             rng = getattr(agent, "rng", None)
             if rng is not None:

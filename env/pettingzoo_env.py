@@ -28,6 +28,7 @@ from env.engine import (
     CatanEngine, acting_player as engine_acting_player, is_legal_action, is_template,
     legal_actions as engine_legal_actions, total_vp,
 )
+from env.public_beliefs import expected_dev_cards, last_offer, turns_since_dev_purchase
 from env.state import DevCard, MAX_TRADE_PROPOSALS_PER_TURN, NUM_PLAYERS, Phase, PlayerState
 
 MAX_ACTIONS = 400
@@ -144,6 +145,20 @@ class CatanAECEnv(AECEnv):
             # many of the turn owner's proposals are already used
             "pending_trade_targets": spaces.Box(0, 1, (NUM_PLAYERS,), dtype=np.int8),
             "trades_proposed_this_turn": spaces.Box(0, MAX_TRADE_PROPOSALS_PER_TURN, (1,), dtype=np.int8),
+            # whose observation this is (encoders make seats observer-relative)
+            "observer": spaces.Box(0, NUM_PLAYERS - 1, (1,), dtype=np.int8),
+            # public supply and deck size
+            "bank": spaces.Box(0, 19, (5,), dtype=np.int16),
+            "dev_deck_size": spaces.Box(0, 25, (1,), dtype=np.int16),
+            # public-event beliefs per seat (env/public_beliefs.py): expected
+            # hidden VP cards / knights, age of last dev purchase (0-1), last
+            # trade offer give/want and its age (0-1)
+            "public_expected_vp": spaces.Box(0, 5, (NUM_PLAYERS,), dtype=np.float32),
+            "public_expected_knights": spaces.Box(0, 14, (NUM_PLAYERS,), dtype=np.float32),
+            "public_dev_purchase_age": spaces.Box(0, 1, (NUM_PLAYERS,), dtype=np.float32),
+            "public_last_offer_give": spaces.Box(0, 3, (NUM_PLAYERS, 5), dtype=np.int8),
+            "public_last_offer_want": spaces.Box(0, 3, (NUM_PLAYERS, 5), dtype=np.int8),
+            "public_last_offer_age": spaces.Box(0, 1, (NUM_PLAYERS,), dtype=np.float32),
             "action_mask": spaces.Box(0, 1, (MAX_ACTIONS,), dtype=np.int8),
         })
 
@@ -445,6 +460,24 @@ def build_observation(state, pid: int, legal_cache: list[Action], show_mask: boo
             counter_want[RESOURCE_INDEX[r]] = amt
         counter_proposer = state.trade_counter_context.proposer
 
+    exp_vp = np.zeros(NUM_PLAYERS, dtype=np.float32)
+    exp_kn = np.zeros(NUM_PLAYERS, dtype=np.float32)
+    dev_age = np.zeros(NUM_PLAYERS, dtype=np.float32)
+    offer_give = np.zeros((NUM_PLAYERS, 5), dtype=np.int8)
+    offer_want = np.zeros((NUM_PLAYERS, 5), dtype=np.int8)
+    offer_age = np.zeros(NUM_PLAYERS, dtype=np.float32)
+    for other_pid in state.players:
+        exp = expected_dev_cards(state, pid, other_pid)
+        exp_vp[other_pid] = exp[DevCard.VICTORY_POINT]
+        exp_kn[other_pid] = exp[DevCard.KNIGHT]
+        dev_age[other_pid] = turns_since_dev_purchase(state, other_pid)
+        g, w, age = last_offer(state, other_pid)
+        for r, k in g.items():
+            offer_give[other_pid, RESOURCE_INDEX[r]] = k
+        for r, k in w.items():
+            offer_want[other_pid, RESOURCE_INDEX[r]] = k
+        offer_age[other_pid] = age
+
     pending_targets = np.zeros(NUM_PLAYERS, dtype=np.int8)
     if state.pending_trade is not None:
         pending_targets[state.pending_trade.targets] = 1
@@ -495,5 +528,14 @@ def build_observation(state, pid: int, legal_cache: list[Action], show_mask: boo
         "counter_trade_proposer": np.array([counter_proposer], dtype=np.int8),
         "pending_trade_targets": pending_targets,
         "trades_proposed_this_turn": np.array([state.trades_proposed_this_turn], dtype=np.int8),
+        "observer": np.array([pid], dtype=np.int8),
+        "bank": np.array([state.bank[r] for r in RESOURCE_LIST], dtype=np.int16),
+        "dev_deck_size": np.array([len(state.dev_card_deck)], dtype=np.int16),
+        "public_expected_vp": exp_vp,
+        "public_expected_knights": exp_kn,
+        "public_dev_purchase_age": dev_age,
+        "public_last_offer_give": offer_give,
+        "public_last_offer_want": offer_want,
+        "public_last_offer_age": offer_age,
         "action_mask": mask,
     }

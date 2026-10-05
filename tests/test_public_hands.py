@@ -182,7 +182,7 @@ def test_gnn_observation_and_model_with_flag():
     for offset in range(3):
         opp = (0 + 1 + offset) % 4
         for i, r in enumerate(Resource):
-            assert abs(obs_on["opponent"][offset, 9 + i] * 19.0 - _est(state, opp)[r]) < 1e-5
+            assert abs(obs_on["opponent"][offset, OPPONENT_FEAT_DIM + i] * 19.0 - _est(state, opp)[r]) < 1e-5
 
     model = GraphActorCritic(hidden=32, gnn_layers=2, public_hand_features=True)
     acts = legal_actions(state)
