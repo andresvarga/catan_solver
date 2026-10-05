@@ -8,3 +8,4 @@
 {"label": "O4-graph-beliefs-once", "config": "gnn256x4-phf cuda envs=32 opp=selfplay", "steps_per_s_mean": 2567, "steps_per_s_sd": 27, "transitions_per_s_mean": 1876, "env_steps": 99010, "transitions": 72369}
 {"label": "O6-trade-forced-steps", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 4994, "steps_per_s_sd": 518, "transitions_per_s_mean": 3644, "env_steps": 24531, "transitions": 17900}
 {"label": "O6-trade-forced-steps-clean", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 6964, "steps_per_s_sd": 30, "transitions_per_s_mean": 5081, "env_steps": 24531, "transitions": 17900}
+{"label": "O3fix-bitexact-normaliser", "config": "hier256x3 cpu envs=16 opp=selfplay", "steps_per_s_mean": 6243, "steps_per_s_sd": 63, "transitions_per_s_mean": 4556, "env_steps": 24531, "transitions": 17900}
